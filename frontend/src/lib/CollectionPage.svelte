@@ -1,0 +1,92 @@
+<script lang="ts">
+  import CollectionView from './CollectionView.svelte'
+  import { core, Go } from './store.svelte'
+  import { hasArtist, norm } from './util'
+  import type { Track } from './types'
+
+  const r = $derived(core.route)
+  let plIds = $state<number[]>([])
+
+  $effect(() => {
+    if (r.name === 'playlist') {
+      void core.playlists
+      const id = Number(r.id)
+      Go.GetPlaylistTrackIDs(id).then((x) => (plIds = (x as number[]) ?? []))
+    }
+  })
+
+  const playlist = $derived(r.name === 'playlist' ? (core.playlists.find((p) => p.id === Number(r.id)) ?? null) : null)
+
+  const tracks = $derived.by((): Track[] => {
+    switch (r.name) {
+      case 'playlist':
+        return plIds.map((id) => core.byId.get(id)).filter((t): t is Track => !!t)
+      case 'liked':
+        return core.tracks.filter((t) => t.liked)
+      case 'recent':
+      case 'allsongs':
+        return core.tracks
+      case 'mostplayed':
+        return core.tracks.filter((t) => t.playCount > 0).sort((a, b) => b.playCount - a.playCount)
+      case 'album': {
+        const key = norm(String(r.id).split('\u0000')[0])
+        return core.tracks.filter((t) => t.album && norm(t.album) === key).sort((a, b) => a.id - b.id)
+      }
+      case 'artist': {
+        const name = String(r.id)
+        return core.tracks.filter((t) => hasArtist(t, name))
+      }
+    }
+    return []
+  })
+
+  const coverIds = $derived(tracks.filter((t) => t.hasCover).slice(0, 4).map((t) => t.id))
+  const title = $derived.by(() => {
+    switch (r.name) {
+      case 'playlist': return playlist?.name ?? 'Playlist'
+      case 'liked': return 'Liked Songs'
+      case 'recent': return 'Recently Added'
+      case 'mostplayed': return 'Most Played'
+      case 'allsongs': return 'All Songs'
+      case 'album': return String(r.id).split('\u0000')[0]
+      case 'artist': return String(r.id)
+    }
+    return ''
+  })
+  const kind = $derived(
+    r.name === 'album' ? 'Album' : r.name === 'artist' ? 'Artist' : r.name === 'playlist' ? 'Playlist' : 'Collection',
+  )
+  const icon = $derived(r.name === 'liked' ? 'heart-fill' : r.name === 'artist' ? 'person' : r.name === 'album' ? 'album' : 'note')
+
+  function reorder(from: number, to: number) {
+    const a = plIds.slice()
+    const [m] = a.splice(from, 1)
+    a.splice(to, 0, m)
+    plIds = a
+    Go.SetPlaylistTracks(Number(r.id), a)
+  }
+  function remove(t: Track) {
+    plIds = plIds.filter((x) => x !== t.id)
+    Go.SetPlaylistTracks(Number(r.id), plIds)
+  }
+  async function addTrack(t: Track) {
+    if (plIds.includes(t.id)) return
+    plIds = [...plIds, t.id]
+    await Go.AddToPlaylist(Number(r.id), [t.id])
+  }
+</script>
+
+{#key r.name + ':' + r.id}
+  <CollectionView
+    {kind}
+    {title}
+    {tracks}
+    {coverIds}
+    {playlist}
+    {icon}
+    round={r.name === 'artist'}
+    onreorder={r.name === 'playlist' ? reorder : undefined}
+    onremove={r.name === 'playlist' ? remove : undefined}
+    onadd={r.name === 'playlist' ? addTrack : undefined}
+  />
+{/key}

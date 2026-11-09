@@ -1,0 +1,25 @@
+# Compiled binaries & Wails build output
+build/bin/
+build/darwin/
+build/windows/
+build/README.md
+vibeMusic
+*.exe
+*.out
+
+# Frontend dependencies & generated files
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/package.json.md5
+frontend/.vscode/
+
+# Local databases, logs & temp files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.log
+.DS_Store
+.env
+.env.*

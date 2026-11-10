@@ -637,6 +637,49 @@ type ytFlatPlaylist struct {
 	} `json:"entries"`
 }
 
+var nonMusicTitleKeywords = []string{
+	"beginner's guide", "guide to", "how to", "writes a", "music theory",
+	"analysis", "analyzing", "explained", "explanation", "tutorial", "lesson",
+	"reaction", "reacts", "review", "interview", "documentary", "tier list",
+	"ranking", "ranked", "top 10", "top 5", "top 20", "history of", "making of",
+	"behind the scenes", "breakdown", "video essay", "essay", "podcast", "lecture",
+	"livestream", "gameplay", "walkthrough", "playthrough", "let's play", "speedrun",
+	"trailer", "teaser", "unboxing", "compilation", "full album", "full ost",
+	"full soundtrack", "1 hour", "2 hours", "3 hours", "10 hours", "voicing",
+	"voiceleading", "chord progression", "sheet music", "piano tutorial",
+	"guitar tab", "synthesia", "play along", "backing track", "critique",
+	"discussion", "retrospective", "the story of", "what happened to",
+	"biography", "deep dive", "vlog", "q&a",
+}
+
+var nonMusicChannelKeywords = []string{
+	"music theory", "explained", "lessons", "tutorials", "reacts",
+	"reviews", "podcast", "gaming", "ign", "gamespot", "synthesia",
+	"piano tutorial", "guitar tab",
+}
+
+func isNonMusicEntry(title, channel string, duration float64) bool {
+	if duration > 0 && (duration < 40 || duration > 540) {
+		return true
+	}
+	tl := strings.ToLower(title)
+	if strings.HasPrefix(tl, "how ") || strings.HasPrefix(tl, "why ") || strings.Contains(tl, "|| how ") || strings.Contains(tl, "| how ") {
+		return true
+	}
+	for _, kw := range nonMusicTitleKeywords {
+		if strings.Contains(tl, kw) {
+			return true
+		}
+	}
+	cl := strings.ToLower(channel)
+	for _, kw := range nonMusicChannelKeywords {
+		if strings.Contains(cl, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 	path := d.app.ytdlp.Path()
 	if path == "" {
@@ -762,11 +805,14 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 				if localTitles[strings.ToLower(title)] {
 					continue
 				}
-				artist := strings.TrimSpace(e.Channel)
-				if artist == "" {
-					artist = strings.TrimSpace(e.Uploader)
+				rawChannel := strings.TrimSpace(e.Channel)
+				if rawChannel == "" {
+					rawChannel = strings.TrimSpace(e.Uploader)
 				}
-				artist = topicSuffixRe.ReplaceAllString(artist, "")
+				if isNonMusicEntry(title, rawChannel, e.Duration) {
+					continue
+				}
+				artist := topicSuffixRe.ReplaceAllString(rawChannel, "")
 				items = append(items, DiscoverItem{
 					VideoID:  e.ID,
 					Title:    title,
@@ -844,10 +890,12 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 	set := d.app.Settings()
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(seed)*7919))
 
-	// Build queries specifically targeting this artist so we get plenty of songs by this artist + closely related songs
+	// Build queries targeting this artist's music so we get plenty of songs across albums/OSTs
 	searchQueries := []string{
-		fmt.Sprintf("ytsearch25:%s", artistName),
-		fmt.Sprintf("ytsearch25:%s official audio ost", artistName),
+		fmt.Sprintf("ytsearch30:%s music", artistName),
+		fmt.Sprintf("ytsearch30:%s", artistName),
+		fmt.Sprintf("ytsearch30:%s soundtrack", artistName),
+		fmt.Sprintf("ytsearch30:%s ost", artistName),
 	}
 	qIdx := ((seed % len(searchQueries)) + len(searchQueries)) % len(searchQueries)
 	primarySearch := searchQueries[qIdx]
@@ -869,7 +917,7 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
 			defer cancel()
-			args := []string{"--flat-playlist", "-J", "--playlist-end", "25", "--no-warnings"}
+			args := []string{"--flat-playlist", "-J", "--playlist-end", "30", "--no-warnings"}
 			if set.CookieBrowser != "" {
 				args = append(args, "--cookies-from-browser", set.CookieBrowser)
 			}
@@ -904,10 +952,6 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 				if _, owned := existingByID[e.ID]; owned {
 					continue
 				}
-				// Skip overly long compilations (> 18 min) or tiny clips (< 30s)
-				if e.Duration > 0 && (e.Duration < 30 || e.Duration > 1080) {
-					continue
-				}
 				title := strings.TrimSpace(e.Title)
 				if title == "" || title == "[Deleted video]" || title == "[Private video]" {
 					continue
@@ -915,11 +959,14 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 				if localTitles[strings.ToLower(title)] {
 					continue
 				}
-				artist := strings.TrimSpace(e.Channel)
-				if artist == "" {
-					artist = strings.TrimSpace(e.Uploader)
+				rawChannel := strings.TrimSpace(e.Channel)
+				if rawChannel == "" {
+					rawChannel = strings.TrimSpace(e.Uploader)
 				}
-				artist = topicSuffixRe.ReplaceAllString(artist, "")
+				if isNonMusicEntry(title, rawChannel, e.Duration) {
+					continue
+				}
+				artist := topicSuffixRe.ReplaceAllString(rawChannel, "")
 				items = append(items, DiscoverItem{
 					VideoID:  e.ID,
 					Title:    title,
@@ -943,12 +990,12 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 		for _, it := range perSource[s] {
 			tKey := strings.ToLower(it.Title)
 			aKey := strings.ToLower(it.Artist)
-			if seenVid[it.VideoID] || seenTitle[tKey] {
+			if it.VideoID == "" || seenVid[it.VideoID] || seenTitle[tKey] {
 				continue
 			}
 			seenVid[it.VideoID] = true
 			seenTitle[tKey] = true
-			if strings.Contains(tKey, targetNorm) || strings.Contains(aKey, targetNorm) || s == 0 {
+			if strings.Contains(aKey, targetNorm) || strings.Contains(tKey, targetNorm) {
 				directMatches = append(directMatches, it)
 			} else {
 				relatedMatches = append(relatedMatches, it)
@@ -956,7 +1003,7 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 		}
 	}
 
-	var out []DiscoverItem
+	out := make([]DiscoverItem, 0, 16)
 	for _, it := range directMatches {
 		out = append(out, it)
 		if len(out) >= 16 {

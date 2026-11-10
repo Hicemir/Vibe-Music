@@ -6,7 +6,7 @@
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu } from './menus'
-  import { buildQuickPicks, fmtTime, hasArtist, norm, splitArtists } from './util'
+  import { buildQuickPicks, fmtTime, hasArtist, horizontalScroll, norm, splitArtists } from './util'
   import type { DiscoverItem, Settings } from './types'
 
   const hour = new Date().getHours()
@@ -377,7 +377,7 @@
         {#if mostPlayed.length === 0}
           <div class="hint">Play some tracks and your most listened songs will appear here.</div>
         {:else}
-          <div class="shelf">
+          <div class="shelf" use:horizontalScroll>
             {#each mostPlayed as t, i (t.id)}
               <Card
                 title={t.title}
@@ -445,6 +445,7 @@
         <div
           class="qp-strip"
           bind:this={qpScroller}
+          use:horizontalScroll
           style="--qp-rows: {effectiveQuickRows}"
         >
           {#each visibleQuickPicks as t (t.id)}
@@ -522,7 +523,7 @@
         {#if artistRadios.length === 0}
           <div class="hint">Add or play some music and artist radio stations will appear here.</div>
         {:else}
-          <div class="shelf">
+          <div class="shelf" use:horizontalScroll>
             {#each artistRadios as ar (ar.name)}
               {@const seedTrack = core.tracks.find((t) => hasArtist(t, ar.name))}
               <Card
@@ -586,7 +587,7 @@
           No online suggestions loaded yet. Click <b>Refresh</b> to fetch recommendations from your library tracks.
         </div>
       {:else}
-        <div class="shelf">
+        <div class="shelf" use:horizontalScroll>
           {#each core.discoverItems as d (d.videoId)}
             <div class="card discover-card">
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -637,7 +638,7 @@
             {@render reorderControls('recentlyAdded')}
           </div>
         </div>
-        <div class="shelf">
+        <div class="shelf" use:horizontalScroll>
           {#each recentlyAdded as t, i (t.id)}
             <Card
               title={t.title}

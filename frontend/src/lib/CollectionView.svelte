@@ -368,7 +368,7 @@
         </div>
       </div>
       <div class="add-list">
-        {#each onlineTracks as d (d.videoId)}
+        {#each onlineTracks as d, i (d.videoId ? `${d.videoId}-${i}` : `track-${i}`)}
           <div class="add-row">
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <div

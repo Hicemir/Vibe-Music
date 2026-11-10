@@ -207,7 +207,7 @@ func (a *App) CloseWindow() {
 }
 
 func (a *App) GetVersion() string {
-	return "0.4.2"
+	return "0.4.4"
 }
 
 func (a *App) OpenInBrowser(url string) {

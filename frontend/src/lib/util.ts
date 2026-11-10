@@ -335,3 +335,202 @@ export const EQ_PRESETS: Record<string, number[]> = {
   Electronic: [5, 4, 1, 0, -2, 2, 1, 2, 4, 5],
   Acoustic: [3, 3, 2, 1, 1, 1, 2, 2, 3, 2],
 }
+
+function createSmoothAxisScroller(node: HTMLElement, axis: 'x' | 'y') {
+  let target = 0
+  let current = 0
+  let rafId = 0
+  let lastTime = 0
+
+  const getPos = () => (axis === 'x' ? node.scrollLeft : node.scrollTop)
+  const setPos = (v: number) => {
+    if (axis === 'x') node.scrollLeft = v
+    else node.scrollTop = v
+  }
+  const getMax = () =>
+    axis === 'x'
+      ? Math.max(0, node.scrollWidth - node.clientWidth)
+      : Math.max(0, node.scrollHeight - node.clientHeight)
+
+  function step(now: number) {
+    const actual = getPos()
+    // If a massive external jump occurred (e.g. user clicked scrollbar track far away), sync immediately
+    if (Math.abs(actual - current) > 60) {
+      current = actual
+      target = actual
+      rafId = 0
+      lastTime = 0
+      return
+    }
+
+    const max = getMax()
+    if (target > max) target = max
+    if (target < 0) target = 0
+
+    const dt = lastTime ? Math.min(50, Math.max(1, now - lastTime)) : 16.6
+    lastTime = now
+
+    const diff = target - current
+    if (Math.abs(diff) < 0.4) {
+      current = target
+      setPos(target)
+      rafId = 0
+      lastTime = 0
+      return
+    }
+
+    // Universal frame-rate-independent smoothing (adapts to 60Hz, 144Hz, 280Hz & multi-monitors)
+    const alpha = 1 - Math.exp(-dt / 50)
+    current += diff * alpha
+    setPos(current)
+    rafId = requestAnimationFrame(step)
+  }
+
+  function addDelta(rawDelta: number, deltaMode: number): boolean {
+    const max = getMax()
+    if (max <= 0) return false
+
+    const actual = getPos()
+    if (!rafId || Math.abs(actual - current) > 40) {
+      current = actual
+      target = actual
+    }
+
+    let px = rawDelta
+    if (deltaMode === 1) {
+      px *= 38
+    } else if (deltaMode === 2) {
+      const page = axis === 'x' ? node.clientWidth : node.clientHeight
+      px *= page * 0.85
+    } else if (Math.abs(px) > 0 && Math.abs(px) < 75) {
+      px *= 1.45
+    }
+
+    const nextTarget = Math.min(max, Math.max(0, target + px))
+    if (nextTarget === target && Math.abs(target - current) < 0.5) {
+      return false
+    }
+
+    target = nextTarget
+    if (!rafId) {
+      lastTime = performance.now()
+      rafId = requestAnimationFrame(step)
+    }
+    return true
+  }
+
+  function stop() {
+    if (rafId) {
+      cancelAnimationFrame(rafId)
+      rafId = 0
+      lastTime = 0
+    }
+    current = getPos()
+    target = current
+  }
+
+  function isAnimating() {
+    return rafId !== 0
+  }
+
+  return { addDelta, stop, isAnimating }
+}
+
+/**
+ * Svelte action: Click-to-activate smooth horizontal wheel scrolling on shelves/strips.
+ * Activates when clicking inside the segment or the space just above the tracks (top margin 32px),
+ * and stops when the mouse is moved outside that segment area.
+ */
+export function horizontalScroll(node: HTMLElement) {
+  const scroller = createSmoothAxisScroller(node, 'x')
+  let active = false
+
+  const TOP_MARGIN = 32
+  const BOTTOM_MARGIN = 14
+  const SIDE_MARGIN = 16
+
+  function isInsideZone(clientX: number, clientY: number): boolean {
+    const rect = node.getBoundingClientRect()
+    return (
+      clientX >= rect.left - SIDE_MARGIN &&
+      clientX <= rect.right + SIDE_MARGIN &&
+      clientY >= rect.top - TOP_MARGIN &&
+      clientY <= rect.bottom + BOTTOM_MARGIN
+    )
+  }
+
+  function onWindowMouseDown(e: MouseEvent) {
+    const inside = isInsideZone(e.clientX, e.clientY)
+    active = inside
+    if (inside) {
+      scroller.stop()
+    }
+  }
+
+  function onWindowMouseMove(e: MouseEvent) {
+    if (!active) return
+    if (!isInsideZone(e.clientX, e.clientY)) {
+      active = false
+    }
+  }
+
+  function onWheel(e: WheelEvent) {
+    if (!active) return
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return
+    if (e.shiftKey || e.ctrlKey) return
+    const maxScroll = node.scrollWidth - node.clientWidth
+    if (maxScroll <= 0) return
+    if (e.deltaY === 0) return
+
+    e.preventDefault()
+    e.stopPropagation()
+    scroller.addDelta(e.deltaY, e.deltaMode)
+  }
+
+  window.addEventListener('mousedown', onWindowMouseDown, { capture: true })
+  window.addEventListener('mousemove', onWindowMouseMove, { passive: true })
+  node.addEventListener('wheel', onWheel, { passive: false })
+
+  return {
+    destroy() {
+      scroller.stop()
+      window.removeEventListener('mousedown', onWindowMouseDown, { capture: true })
+      window.removeEventListener('mousemove', onWindowMouseMove)
+      node.removeEventListener('wheel', onWheel)
+    },
+  }
+}
+
+/**
+ * Svelte action: High-refresh-rate (280Hz+) smooth vertical mouse wheel scrolling.
+ */
+export function smoothScroll(node: HTMLElement) {
+  const scroller = createSmoothAxisScroller(node, 'y')
+
+  function onMouseDown() {
+    scroller.stop()
+  }
+
+  function onWheel(e: WheelEvent) {
+    if (e.defaultPrevented) return
+    if (e.ctrlKey || e.shiftKey) return
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return
+    if (e.deltaY === 0) return
+    if (node.scrollHeight <= node.clientHeight) return
+
+    e.preventDefault()
+    scroller.addDelta(e.deltaY, e.deltaMode)
+  }
+
+  node.addEventListener('mousedown', onMouseDown, { capture: true, passive: true })
+  node.addEventListener('wheel', onWheel, { passive: false })
+
+  return {
+    destroy() {
+      scroller.stop()
+      node.removeEventListener('mousedown', onMouseDown, { capture: true })
+      node.removeEventListener('wheel', onWheel)
+    },
+  }
+}
+

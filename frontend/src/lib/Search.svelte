@@ -2,7 +2,7 @@
   import Card from './Card.svelte'
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
-  import { groupBy, matches, norm } from './util'
+  import { groupBy, horizontalScroll, matches, norm } from './util'
 
   let filter = $state<'all' | 'songs' | 'albums' | 'artists' | 'playlists'>('all')
   const q = $derived(core.query.trim())
@@ -35,7 +35,7 @@
   {#if (filter === 'all' || filter === 'artists') && artists.length}
     <div class="section" style="margin-top:8px">
       <div class="section-head"><h2>Artists</h2></div>
-      <div class="shelf">
+      <div class="shelf" use:horizontalScroll>
         {#each artists.slice(0, filter === 'all' ? 12 : 100) as g (g.key)}
           <Card title={g.name} sub="{g.tracks.length} songs" id={g.coverId} icon="person" round onclick={() => core.go({ name: 'artist', id: g.name })} onplay={() => core.play(g.tracks.map((t) => t.id), -1)} />
         {/each}
@@ -45,7 +45,7 @@
   {#if (filter === 'all' || filter === 'albums') && albums.length}
     <div class="section">
       <div class="section-head"><h2>Albums</h2></div>
-      <div class="shelf">
+      <div class="shelf" use:horizontalScroll>
         {#each albums.slice(0, filter === 'all' ? 12 : 100) as g (g.key)}
           <Card title={g.name} sub={g.sub} id={g.coverId} icon="album" onclick={() => core.go({ name: 'album', id: g.name })} onplay={() => core.play(g.tracks.map((t) => t.id), -1)} />
         {/each}
@@ -55,7 +55,7 @@
   {#if (filter === 'all' || filter === 'playlists') && playlists.length}
     <div class="section">
       <div class="section-head"><h2>Playlists</h2></div>
-      <div class="shelf">
+      <div class="shelf" use:horizontalScroll>
         {#each playlists as p (p.id)}
           <Card title={p.name} sub="{p.trackCount} songs" ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" onclick={() => core.go({ name: 'playlist', id: p.id })} onplay={() => playPlaylist(p.id)} />
         {/each}

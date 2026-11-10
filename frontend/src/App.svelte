@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
   import { core, Go } from './lib/store.svelte'
+  import { smoothScroll } from './lib/util'
   import Icon from './lib/Icon.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import TopBar from './lib/TopBar.svelte'
@@ -193,7 +194,7 @@
     <Sidebar />
     <div class="main">
       <TopBar bind:this={topbar} />
-      <div class="scroll" bind:this={scroller}>
+      <div class="scroll" bind:this={scroller} use:smoothScroll>
         {#if !core.loaded}
           <div class="empty">Loading…</div>
         {:else if r.name === 'home'}

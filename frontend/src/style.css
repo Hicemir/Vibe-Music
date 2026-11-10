@@ -232,7 +232,7 @@ h1, h2, h3, p { margin: 0; }
 .scroll { flex: 1; overflow-y: auto; min-height: 0; padding: 0 24px 32px; }
 .view-head { padding: 8px 0 16px; }
 .view-title { font-size: 28px; font-weight: 800; letter-spacing: -.3px; }
-.section { margin-top: 28px; }
+.section { margin-top: 32px; }
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
 .section-head h2 { font-size: 21px; font-weight: 800; }
 .link-btn { color: var(--text-dim); font-weight: 700; font-size: 13px; }
@@ -276,7 +276,7 @@ h1, h2, h3, p { margin: 0; }
 .card .sub { color: var(--text-dim); font-size: 13px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .play-fab { width: 44px; height: 44px; border-radius: 50%; background: var(--accent); color: #000; display: grid; place-items: center; box-shadow: 0 8px 16px rgba(0,0,0,.5); }
 .play-fab:hover { background: var(--accent-hover); transform: scale(1.06) !important; }
-.shelf { display: grid; grid-auto-flow: column; grid-auto-columns: 168px; gap: 18px; overflow-x: auto; padding-bottom: 8px; }
+.shelf { display: grid; grid-auto-flow: column; grid-auto-columns: 168px; gap: 18px; overflow-x: auto; padding-top: 6px; margin-top: -6px; padding-bottom: 8px; }
 
 /* cover */
 .cover { width: 100%; height: 100%; background: linear-gradient(135deg, #2b2b3a, #1b1b26); display: grid; place-items: center; color: var(--text-faint); overflow: hidden; position: relative; }
@@ -619,8 +619,9 @@ input[type=range] { accent-color: var(--accent); }
   grid-auto-columns: 315px;
   gap: 12px 16px;
   overflow-x: auto;
+  padding-top: 6px;
+  margin-top: -6px;
   padding-bottom: 10px;
-  scroll-behavior: smooth;
 }
 .qp-card {
   display: flex;
@@ -665,9 +666,35 @@ input[type=range] { accent-color: var(--accent); }
 .qp-more-tile:hover { background: var(--bg-hover); color: var(--text); border-color: var(--accent); }
 
 /* Radio Mix filter pills in Queue panel */
-.radio-pills { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border); overflow-x: auto; flex-shrink: 0; }
-.radio-pill { padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--bg-elev2); color: var(--text-dim); white-space: nowrap; transition: .15s; }
-.radio-pill:hover { color: var(--text); background: var(--bg-hover); }
+.radio-pills {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  margin: 8px 14px 10px;
+  background: var(--bg-elev2);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.radio-pill {
+  flex: 1;
+  height: 28px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  background: transparent;
+  color: var(--text-dim);
+  white-space: nowrap;
+  border: 0;
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+}
+.radio-pill:hover { color: var(--text); }
 .radio-pill.active { background: var(--accent); color: #000; }
 
 /* Online Discover cards */

@@ -3,6 +3,7 @@
   import Cover from './Cover.svelte'
   import { core } from './store.svelte'
   import { trackMenu } from './menus'
+  import { smoothScroll } from './util'
 
   const r = $derived(core.route)
   const t = $derived(core.current)
@@ -33,7 +34,7 @@
       <span>Your playlists</span>
       <button class="icon-btn" style="width:28px;height:28px" onclick={() => (core.modal = { type: 'newPlaylist' })} title="New playlist" aria-label="New playlist"><Icon name="plus" size={20} /></button>
     </div>
-    <div class="lib-list">
+    <div class="lib-list" use:smoothScroll>
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div
         class="pl-item"

@@ -2,7 +2,7 @@
   import Icon from './Icon.svelte'
   import Cover from './Cover.svelte'
   import { core, Go } from './store.svelte'
-  import { fmtTime } from './util'
+  import { fmtTime, smoothScroll } from './util'
 
   let dragFrom = $state(-1)
   let dragOver = $state(-1)
@@ -46,7 +46,7 @@
       {/each}
     </div>
   {/if}
-  <div class="panel-body">
+  <div class="panel-body" use:smoothScroll>
     {#if core.queue.length === 0}
       <div class="empty"><div class="big">Your queue is empty</div>Play something, or right-click a song and choose “Add to queue”.</div>
     {/if}

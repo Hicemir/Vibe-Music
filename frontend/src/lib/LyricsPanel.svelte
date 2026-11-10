@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from './Icon.svelte'
   import { core, Go } from './store.svelte'
+  import { smoothScroll } from './util'
   import type { Lyrics } from './types'
 
   let lyrics = $state<Lyrics>({ synced: false, lines: [] })
@@ -45,7 +46,7 @@
     <span>Lyrics</span>
     <button class="icon-btn" onclick={() => (core.panel = 'none')} aria-label="Close"><Icon name="close" size={20} /></button>
   </div>
-  <div class="panel-body" bind:this={body}>
+  <div class="panel-body" bind:this={body} use:smoothScroll>
     {#if !core.current}
       <div class="empty">Play a song to see its lyrics.</div>
     {:else if lines.length === 0}

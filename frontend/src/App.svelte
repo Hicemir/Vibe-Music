@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte'
   import { core, Go } from './lib/store.svelte'
+  import Icon from './lib/Icon.svelte'
   import Sidebar from './lib/Sidebar.svelte'
   import TopBar from './lib/TopBar.svelte'
   import PlayerBar from './lib/PlayerBar.svelte'
@@ -19,7 +20,28 @@
 
   let topbar: TopBar | undefined = $state()
   let scroller: HTMLDivElement | undefined = $state()
+  let topBarVisible = $state(false)
   const r = $derived(core.route)
+
+  function onWindowMouseMove(e: MouseEvent) {
+    if (e.clientY <= 12) {
+      topBarVisible = true
+    } else if (topBarVisible && e.clientY > 40) {
+      topBarVisible = false
+    }
+  }
+
+  function onHoverBarMouseDown(e: MouseEvent) {
+    if (e.button === 0 && !(e.target as HTMLElement | null)?.closest('button')) {
+      Go.ArmWindowDrag()
+    }
+  }
+
+  function onHoverBarDblClick(e: MouseEvent) {
+    if (!(e.target as HTMLElement | null)?.closest('button')) {
+      Go.ToggleMaximiseWindow()
+    }
+  }
 
   onMount(() => {
     core.init()
@@ -126,10 +148,43 @@
 
 <svelte:window
   onkeydown={onKey}
+  onmousemove={onWindowMouseMove}
   onmousedown={onMouseButton}
   onmouseup={onMouseButton}
   oncontextmenu={(e) => { if (!(e.target as HTMLElement).closest('input,textarea')) e.preventDefault() }}
 />
+
+{#if !core.mini}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="hover-top-zone"
+    class:show={topBarVisible}
+    onmouseenter={() => (topBarVisible = true)}
+    onmouseleave={(e) => { if (e.clientY > 36) topBarVisible = false }}
+    onmousedown={onHoverBarMouseDown}
+    ondblclick={onHoverBarDblClick}
+  >
+    <div class="hover-topbar">
+      <div class="hover-win-controls">
+        <button class="hover-wb-btn" onclick={() => Go.MinimiseWindow()} title="Minimize" aria-label="Minimize">
+          <Icon name="chevron-down" size={18} />
+        </button>
+        <button class="hover-wb-btn" onclick={() => Go.ToggleMaximiseWindow()} title={core.windowMaximised ? 'Restore' : 'Maximize'} aria-label="Maximize or restore">
+          <Icon name="chevron-up" size={18} />
+        </button>
+        <button
+          class="hover-wb-btn close"
+          onmousedown={(e) => e.stopPropagation()}
+          onclick={() => Go.CloseWindow()}
+          title="Close"
+          aria-label="Close"
+        >
+          <Icon name="close" size={18} />
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if core.mini}
   <MiniPlayer />

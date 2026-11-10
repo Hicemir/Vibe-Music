@@ -36,6 +36,37 @@
     if (s && s.musicDirs.length > 1) save({ musicDirs: s.musicDirs.filter((x) => x !== d) })
     else core.toast('You need at least one music folder')
   }
+
+  const HOME_SECTION_META: { id: string; title: string; desc: string }[] = [
+    { id: 'recentPlaylists', title: 'Recent playlists', desc: 'Compact top grid of your 4 most recently played playlists.' },
+    { id: 'topTracks', title: 'Your top tracks', desc: 'Horizontal shelf of your most played tracks.' },
+    { id: 'quickPicks', title: 'Quick picks (Speed Dial)', desc: 'Horizontal strip of smart picks that start a local radio mix when clicked.' },
+    { id: 'discover', title: 'Online Discover (You might like)', desc: 'Opt-in YouTube Music recommendations for songs not in your library yet.' },
+    { id: 'recentlyAdded', title: 'Recently added', desc: 'Horizontal shelf of the newest songs added to your library.' },
+    { id: 'allMusic', title: 'All your music', desc: 'Full sortable table of your entire local music pool at the bottom of Home.' },
+  ]
+
+  function isSectionVisible(id: string): boolean {
+    const hidden = s?.homeHidden ?? ['discover']
+    return !hidden.includes(id)
+  }
+
+  function toggleHomeSection(id: string) {
+    if (!s) return
+    const cur = new Set(s.homeHidden ?? ['discover'])
+    if (cur.has(id)) cur.delete(id)
+    else cur.add(id)
+    save({ homeHidden: [...cur] })
+  }
+
+  function resetHomeLayout() {
+    save({
+      homeOrder: ['recentPlaylists', 'topTracks', 'quickPicks', 'discover', 'recentlyAdded', 'allMusic'],
+      homeHidden: ['discover'],
+      quickPicksRows: '1',
+    })
+    core.toast('Home layout reset to default')
+  }
 </script>
 
 <div class="view-head">
@@ -60,6 +91,32 @@
   </div>
 
   <div class="set-group">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <h3>Home page sections</h3>
+      <button class="btn ghost" onclick={resetHomeLayout}>Reset default</button>
+    </div>
+    <div class="hint">Choose which sections appear on your Home screen. Use the pencil (✎) icon on the Home screen to reorder them.</div>
+    {#each HOME_SECTION_META as sec}
+      <div class="set-row">
+        <div class="lbl">{sec.title}<div class="d">{sec.desc}</div></div>
+        <button class="switch" class:on={isSectionVisible(sec.id)} onclick={() => toggleHomeSection(sec.id)} aria-label="toggle"></button>
+      </div>
+    {/each}
+    <div class="set-row">
+      <div class="lbl">
+        Quick picks row height
+        <div class="d"><b>1x</b> is a single row. <b>Auto</b> expands to 2x or 3x rows automatically when you hide Top Tracks or Recently Added.</div>
+      </div>
+      <select class="pill-input" value={s.quickPicksRows || '1'} onchange={(e) => save({ quickPicksRows: e.currentTarget.value })}>
+        <option value="1">1x (Single row)</option>
+        <option value="auto">Auto (Expand when shelves hidden)</option>
+        <option value="2">2x (2 rows)</option>
+        <option value="3">3x (3 rows)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="set-group">
     <h3>Downloads (yt-dlp)</h3>
     <div class="set-row">
       <div class="lbl">Download folder<div class="d">{s.downloadDir}</div></div>
@@ -75,6 +132,21 @@
         <option value="opus">Opus</option>
         <option value="best">Best available</option>
         <option value="mp3">MP3</option>
+      </select>
+    </div>
+    <div class="set-row">
+      <div class="lbl">
+        YouTube Music browser session (optional)
+        <div class="d">Lets yt-dlp read your browser's YouTube Music cookies to import private playlists / Liked Music and personalize Online Discover.</div>
+      </div>
+      <select class="pill-input" value={s.cookieBrowser || ''} onchange={(e) => save({ cookieBrowser: e.currentTarget.value })}>
+        <option value="">None (Public only)</option>
+        <option value="firefox">Firefox</option>
+        <option value="brave">Brave</option>
+        <option value="chrome">Chrome</option>
+        <option value="chromium">Chromium</option>
+        <option value="vivaldi">Vivaldi</option>
+        <option value="edge">Edge</option>
       </select>
     </div>
     <div class="set-row">

@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -210,22 +212,23 @@ func (y *Ytdlp) refreshFlags(path string) {
 // ---------- download jobs ----------
 
 type DownloadJob struct {
-	ID        int64   `json:"id"`
-	URL       string  `json:"url"`
-	Mode      string  `json:"mode"` // track | playlist
-	Status    string  `json:"status"`
-	Title     string  `json:"title"`
-	Playlist  string  `json:"playlist"`
-	Percent   float64 `json:"percent"`
-	Speed     string  `json:"speed"`
-	Index     int     `json:"index"`
-	Total     int     `json:"total"`
-	Done      int     `json:"done"`
-	Error     string  `json:"error"`
-	StartedAt int64   `json:"startedAt"`
+	ID         int64   `json:"id"`
+	URL        string  `json:"url"`
+	Mode       string  `json:"mode"` // track | playlist
+	Status     string  `json:"status"`
+	Title      string  `json:"title"`
+	Playlist   string  `json:"playlist"`
+	Percent    float64 `json:"percent"`
+	Speed      string  `json:"speed"`
+	Index      int     `json:"index"`
+	Total      int     `json:"total"`
+	Done       int     `json:"done"`
+	Error      string  `json:"error"`
+	StartedAt  int64   `json:"startedAt"`
 
-	cancel context.CancelFunc
-	files  []string
+	cancel           context.CancelFunc
+	files            []string
+	targetPlaylistID int64
 }
 
 type Downloader struct {
@@ -260,6 +263,14 @@ func (d *Downloader) push(j *DownloadJob) {
 }
 
 func (d *Downloader) Add(url, mode string) (int64, error) {
+	return d.addInternal(url, mode, 0)
+}
+
+func (d *Downloader) AddToPlaylist(url string, playlistID int64) (int64, error) {
+	return d.addInternal(url, "track", playlistID)
+}
+
+func (d *Downloader) addInternal(url, mode string, targetPlaylistID int64) (int64, error) {
 	url = strings.TrimSpace(url)
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return 0, fmt.Errorf("please paste a valid URL (starting with http/https)")
@@ -272,7 +283,15 @@ func (d *Downloader) Add(url, mode string) (int64, error) {
 	}
 	d.mu.Lock()
 	d.nextID++
-	j := &DownloadJob{ID: d.nextID, URL: url, Mode: mode, Status: "queued", Title: url, StartedAt: time.Now().Unix()}
+	j := &DownloadJob{
+		ID:               d.nextID,
+		URL:              url,
+		Mode:             mode,
+		Status:           "queued",
+		Title:            url,
+		StartedAt:        time.Now().Unix(),
+		targetPlaylistID: targetPlaylistID,
+	}
 	d.jobs = append(d.jobs, j)
 	d.mu.Unlock()
 	d.push(j)
@@ -360,6 +379,12 @@ func (d *Downloader) run(ctx context.Context, j *DownloadJob) {
 				j.Done = 1
 				j.files = []string{existingPath}
 				d.mu.Unlock()
+				if j.targetPlaylistID > 0 {
+					if t, ok := d.app.store.TrackByPath(existingPath); ok {
+						_, _ = d.app.store.AddToPlaylist(j.targetPlaylistID, []int64{t.ID})
+						d.app.emit("playlists:changed")
+					}
+				}
 				d.finish(j, "done", "Already in your library — skipped download")
 				return
 			}
@@ -388,6 +413,9 @@ func (d *Downloader) run(ctx context.Context, j *DownloadJob) {
 		args = append(args, "--yes-playlist")
 	} else {
 		args = append(args, "--no-playlist")
+	}
+	if set.CookieBrowser != "" {
+		args = append(args, "--cookies-from-browser", set.CookieBrowser)
 	}
 	args = append(args, formatArgs(set.DownloadFormat)...)
 	if _, err := exec.LookPath("node"); err == nil {
@@ -529,9 +557,28 @@ func (d *Downloader) run(ctx context.Context, j *DownloadJob) {
 	d.app.scanner.Scan(d.app.scanDirs())
 	d.app.reloadTracks()
 	d.app.emit("library:changed")
+	if strings.Contains(j.URL, "list=LM") {
+		d.app.likeFiles(files)
+	}
+	if j.targetPlaylistID > 0 {
+		var ids []int64
+		for _, f := range files {
+			if t, ok := d.app.store.TrackByPath(f); ok {
+				ids = append(ids, t.ID)
+			}
+		}
+		if len(ids) > 0 {
+			_, _ = d.app.store.AddToPlaylist(j.targetPlaylistID, ids)
+			d.app.emit("playlists:changed")
+		}
+	}
 	if j.Mode == "playlist" {
 		if plName == "" {
-			plName = "Downloaded Playlist"
+			if strings.Contains(j.URL, "list=LM") {
+				plName = "YouTube Liked Music"
+			} else {
+				plName = "Downloaded Playlist"
+			}
 		}
 		d.app.addFilesToPlaylist(plName, files)
 		d.mu.Lock()
@@ -567,4 +614,200 @@ func (d *Downloader) finish(j *DownloadJob, status, msg string) {
 			d.app.emit("app:toast", fmt.Sprintf("Downloaded %d track(s)", done))
 		}
 	}
+}
+
+// ---------- Online Discovery (YouTube Music Radio via yt-dlp) ----------
+
+type DiscoverItem struct {
+	VideoID  string  `json:"videoId"`
+	Title    string  `json:"title"`
+	Artist   string  `json:"artist"`
+	Duration float64 `json:"duration"`
+	ThumbURL string  `json:"thumbUrl"`
+	URL      string  `json:"url"`
+}
+
+type ytFlatPlaylist struct {
+	Entries []struct {
+		ID       string  `json:"id"`
+		Title    string  `json:"title"`
+		Uploader string  `json:"uploader"`
+		Channel  string  `json:"channel"`
+		Duration float64 `json:"duration"`
+	} `json:"entries"`
+}
+
+func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
+	path := d.app.ytdlp.Path()
+	if path == "" {
+		return []DiscoverItem{}
+	}
+	existingByID := d.existingVideoIDMap()
+	localTitles := map[string]bool{}
+
+	type seedCandidate struct {
+		vid    string
+		artist string
+	}
+	byArtist := map[string][]seedCandidate{}
+	d.app.trMu.RLock()
+	for _, t := range d.app.tracks {
+		localTitles[strings.ToLower(strings.TrimSpace(t.Title))] = true
+		if m := fileVidIDRe.FindStringSubmatch(t.Path); len(m) == 2 {
+			artists := splitArtistsGo(t.Artist)
+			primary := "unknown"
+			if len(artists) > 0 {
+				primary = strings.ToLower(strings.TrimSpace(artists[0]))
+			}
+			byArtist[primary] = append(byArtist[primary], seedCandidate{vid: m[1], artist: primary})
+		}
+	}
+	d.app.trMu.RUnlock()
+
+	if len(byArtist) == 0 {
+		return []DiscoverItem{}
+	}
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(seed)*99991))
+	artistKeys := make([]string, 0, len(byArtist))
+	for k := range byArtist {
+		artistKeys = append(artistKeys, k)
+	}
+	rng.Shuffle(len(artistKeys), func(i, j int) {
+		artistKeys[i], artistKeys[j] = artistKeys[j], artistKeys[i]
+	})
+
+	// Pick up to 4 distinct artists so every refresh mixes different genres/artists
+	var chosen []string
+	seenSeed := map[string]bool{}
+	for _, ak := range artistKeys {
+		list := byArtist[ak]
+		pick := list[rng.Intn(len(list))].vid
+		if !seenSeed[pick] {
+			seenSeed[pick] = true
+			chosen = append(chosen, pick)
+		}
+		if len(chosen) >= 4 {
+			break
+		}
+	}
+	// If the library has fewer than 4 distinct artists, top up with additional tracks
+	if len(chosen) < 4 {
+		for _, ak := range artistKeys {
+			for _, c := range byArtist[ak] {
+				if !seenSeed[c.vid] {
+					seenSeed[c.vid] = true
+					chosen = append(chosen, c.vid)
+					if len(chosen) >= 4 {
+						break
+					}
+				}
+			}
+			if len(chosen) >= 4 {
+				break
+			}
+		}
+	}
+
+	set := d.app.Settings()
+	perSeed := make([][]DiscoverItem, len(chosen))
+	var wg sync.WaitGroup
+
+	for idx, vid := range chosen {
+		wg.Add(1)
+		go func(i int, v string) {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+			defer cancel()
+			mixURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", v, v)
+			args := []string{"--flat-playlist", "-J", "--playlist-end", "22", "--no-warnings"}
+			if set.CookieBrowser != "" {
+				args = append(args, "--cookies-from-browser", set.CookieBrowser)
+			}
+			args = append(args, mixURL)
+			cmd := exec.CommandContext(ctx, path, args...)
+			setCmdHidden(cmd)
+			raw, err := cmd.Output()
+			if err != nil || len(raw) == 0 {
+				return
+			}
+			var pl ytFlatPlaylist
+			if json.Unmarshal(raw, &pl) != nil || len(pl.Entries) == 0 {
+				return
+			}
+			localRng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(i)*7919))
+			entries := append([]struct {
+				ID       string  `json:"id"`
+				Title    string  `json:"title"`
+				Uploader string  `json:"uploader"`
+				Channel  string  `json:"channel"`
+				Duration float64 `json:"duration"`
+			}(nil), pl.Entries...)
+			localRng.Shuffle(len(entries), func(a, b int) {
+				entries[a], entries[b] = entries[b], entries[a]
+			})
+
+			var items []DiscoverItem
+			for _, e := range entries {
+				if len(e.ID) != 11 {
+					continue
+				}
+				if _, owned := existingByID[e.ID]; owned {
+					continue
+				}
+				title := strings.TrimSpace(e.Title)
+				if title == "" || title == "[Deleted video]" || title == "[Private video]" {
+					continue
+				}
+				if localTitles[strings.ToLower(title)] {
+					continue
+				}
+				artist := strings.TrimSpace(e.Channel)
+				if artist == "" {
+					artist = strings.TrimSpace(e.Uploader)
+				}
+				artist = topicSuffixRe.ReplaceAllString(artist, "")
+				items = append(items, DiscoverItem{
+					VideoID:  e.ID,
+					Title:    title,
+					Artist:   artist,
+					Duration: e.Duration,
+					ThumbURL: fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", e.ID),
+					URL:      fmt.Sprintf("https://www.youtube.com/watch?v=%s", e.ID),
+				})
+			}
+			perSeed[i] = items
+		}(idx, vid)
+	}
+	wg.Wait()
+
+	// Interleave results across all seeds while capping at 2 tracks per channel/artist
+	seenVid := map[string]bool{}
+	seenTitle := map[string]bool{}
+	artistCount := map[string]int{}
+	var out []DiscoverItem
+
+	for round := 0; round < 8 && len(out) < 16; round++ {
+		for s := 0; s < len(perSeed) && len(out) < 16; s++ {
+			if round >= len(perSeed[s]) {
+				continue
+			}
+			it := perSeed[s][round]
+			tKey := strings.ToLower(it.Title)
+			aKey := strings.ToLower(it.Artist)
+			if seenVid[it.VideoID] || seenTitle[tKey] {
+				continue
+			}
+			if aKey != "" && artistCount[aKey] >= 2 {
+				continue
+			}
+			seenVid[it.VideoID] = true
+			seenTitle[tKey] = true
+			if aKey != "" {
+				artistCount[aKey]++
+			}
+			out = append(out, it)
+		}
+	}
+	return out
 }

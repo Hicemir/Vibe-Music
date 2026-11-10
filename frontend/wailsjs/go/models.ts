@@ -1,5 +1,27 @@
 export namespace main {
 	
+	export class DiscoverItem {
+	    videoId: string;
+	    title: string;
+	    artist: string;
+	    duration: number;
+	    thumbUrl: string;
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiscoverItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.videoId = source["videoId"];
+	        this.title = source["title"];
+	        this.artist = source["artist"];
+	        this.duration = source["duration"];
+	        this.thumbUrl = source["thumbUrl"];
+	        this.url = source["url"];
+	    }
+	}
 	export class DownloadJob {
 	    id: number;
 	    url: string;
@@ -84,6 +106,7 @@ export namespace main {
 	}
 	export class PlayerState {
 	    trackId: number;
+	    playlistId: number;
 	    playing: boolean;
 	    loaded: boolean;
 	    position: number;
@@ -106,6 +129,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.trackId = source["trackId"];
+	        this.playlistId = source["playlistId"];
 	        this.playing = source["playing"];
 	        this.loaded = source["loaded"];
 	        this.position = source["position"];
@@ -162,6 +186,10 @@ export namespace main {
 	    windowWidth: number;
 	    windowHeight: number;
 	    windowMaximised: boolean;
+	    homeOrder: string[];
+	    homeHidden: string[];
+	    quickPicksRows: string;
+	    cookieBrowser: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -184,6 +212,10 @@ export namespace main {
 	        this.windowWidth = source["windowWidth"];
 	        this.windowHeight = source["windowHeight"];
 	        this.windowMaximised = source["windowMaximised"];
+	        this.homeOrder = source["homeOrder"];
+	        this.homeHidden = source["homeHidden"];
+	        this.quickPicksRows = source["quickPicksRows"];
+	        this.cookieBrowser = source["cookieBrowser"];
 	    }
 	}
 	export class Track {

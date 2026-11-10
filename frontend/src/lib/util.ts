@@ -129,7 +129,13 @@ function titleTokens(title: string): string[] {
     .filter((w) => w.length >= 3 && !STOP_WORDS.has(w))
 }
 
-export function recommendForPlaylist(playlistTracks: Track[], allTracks: Track[], seed = 0, limit = 8): Track[] {
+export function recommendForPlaylist(
+  playlistTracks: Track[],
+  allTracks: Track[],
+  seed = 0,
+  limit = 8,
+  playlistTrackMap: Record<number, number[]> = {},
+): Track[] {
   const inPlaylist = new Set(playlistTracks.map((t) => t.id))
   const candidates = allTracks.filter((t) => !inPlaylist.has(t.id))
   if (candidates.length === 0) return []
@@ -137,6 +143,7 @@ export function recommendForPlaylist(playlistTracks: Track[], allTracks: Track[]
   const artistFreq = new Map<string, number>()
   const albumFreq = new Map<string, number>()
   const tokenFreq = new Map<string, number>()
+  const cooccurFreq = new Map<number, number>()
 
   for (const t of playlistTracks) {
     for (const a of splitArtists(t.artist)) {
@@ -154,22 +161,41 @@ export function recommendForPlaylist(playlistTracks: Track[], allTracks: Track[]
     }
   }
 
+  // Playlist co-occurrence across other playlists in the library
+  for (const tids of Object.values(playlistTrackMap)) {
+    if (!Array.isArray(tids) || tids.length < 2) continue
+    let overlap = 0
+    for (const id of tids) {
+      if (inPlaylist.has(id)) overlap++
+    }
+    if (overlap > 0) {
+      const weight = Math.min(overlap, 4)
+      for (const id of tids) {
+        if (!inPlaylist.has(id)) {
+          cooccurFreq.set(id, (cooccurFreq.get(id) ?? 0) + weight)
+        }
+      }
+    }
+  }
+
   const scored = candidates.map((c) => {
     let score = 0
     for (const a of splitArtists(c.artist)) {
       const f = artistFreq.get(norm(a))
-      if (f) score += 50 * Math.min(f, 3)
+      if (f) score += 55 * Math.min(f, 3)
     }
+    const co = cooccurFreq.get(c.id)
+    if (co) score += 42 * Math.min(co, 4)
     if (c.album) {
       const f = albumFreq.get(norm(c.album))
-      if (f) score += 35 * Math.min(f, 3)
+      if (f) score += 38 * Math.min(f, 3)
     }
     for (const tok of titleTokens(c.title)) {
       const f = tokenFreq.get(tok)
-      if (f) score += 14 * Math.min(f, 2)
+      if (f) score += 16 * Math.min(f, 2)
     }
-    if (c.liked) score += 10
-    score += Math.min(c.playCount * 2, 12)
+    if (c.liked) score += 12
+    score += Math.min(c.playCount * 3, 18)
 
     const hash = (((c.id * 2654435761) ^ ((seed + 1) * 1013904223)) >>> 0) / 4294967295
     const jitter = seed === 0 ? (playlistTracks.length > 0 ? 28 : 50) : 260
@@ -181,12 +207,108 @@ export function recommendForPlaylist(playlistTracks: Track[], allTracks: Track[]
   return scored.slice(0, limit).map((x) => x.track)
 }
 
+export function buildRadioMix(
+  seedTrack: Track,
+  allTracks: Track[],
+  playlistTrackMap: Record<number, number[]> = {},
+  mode: 'all' | 'familiar' | 'rediscover' | 'artist' = 'all',
+  limit = 25,
+): Track[] {
+  const seedArtists = new Set(splitArtists(seedTrack.artist).map((a) => norm(a)))
+  const seedAlbum = seedTrack.album ? norm(seedTrack.album) : ''
+  const seedTokens = new Set(titleTokens(seedTrack.title))
+
+  const cooccur = new Map<number, number>()
+  for (const tids of Object.values(playlistTrackMap)) {
+    if (Array.isArray(tids) && tids.includes(seedTrack.id)) {
+      for (const id of tids) {
+        if (id !== seedTrack.id) cooccur.set(id, (cooccur.get(id) ?? 0) + 1)
+      }
+    }
+  }
+
+  let pool = allTracks.filter((t) => t.id !== seedTrack.id)
+  if (mode === 'familiar') {
+    const fam = pool.filter((t) => t.playCount > 0 || t.liked)
+    if (fam.length >= 6) pool = fam
+  } else if (mode === 'rediscover') {
+    const now = Math.floor(Date.now() / 1000)
+    const deep = pool.filter((t) => t.playCount <= 1 || now - t.lastPlayed > 7 * 86400)
+    if (deep.length >= 6) pool = deep
+  } else if (mode === 'artist') {
+    const sameArt = pool.filter((t) => splitArtists(t.artist).some((a) => seedArtists.has(norm(a))))
+    if (sameArt.length >= 4) pool = sameArt
+  }
+
+  const scored = pool.map((c) => {
+    let score = 0
+    const cArtists = splitArtists(c.artist).map((a) => norm(a))
+    const sharedArt = cArtists.filter((a) => seedArtists.has(a)).length
+    if (sharedArt > 0) score += mode === 'artist' ? 140 : 65 * sharedArt
+    const co = cooccur.get(c.id) ?? 0
+    if (co > 0) score += 50 * Math.min(co, 3)
+    if (seedAlbum && c.album && norm(c.album) === seedAlbum) score += 45
+    for (const tok of titleTokens(c.title)) {
+      if (seedTokens.has(tok)) score += 20
+    }
+    if (mode === 'familiar') {
+      score += Math.min(c.playCount * 10, 60) + (c.liked ? 35 : 0)
+    } else if (mode === 'rediscover') {
+      if (c.playCount === 0) score += 45
+      if (c.liked) score += 20
+    } else {
+      if (c.liked) score += 18
+      score += Math.min(c.playCount * 4, 24)
+    }
+    const h = (((c.id * 2654435761) ^ (seedTrack.id * 1013904223)) >>> 0) / 4294967295
+    score += h * 32
+    return { track: c, score }
+  })
+
+  scored.sort((a, b) => b.score - a.score)
+  return [seedTrack, ...scored.slice(0, Math.max(0, limit - 1)).map((x) => x.track)]
+}
+
+export function buildQuickPicks(allTracks: Track[], seed = 0): Track[] {
+  if (allTracks.length === 0) return []
+  const now = Math.floor(Date.now() / 1000)
+  const scored = allTracks.map((t) => {
+    let s = 0
+    if (t.playCount > 0) s += Math.min(t.playCount * 14, 90)
+    if (t.liked) s += 45
+    if (t.lastPlayed > 0) {
+      const ageDays = Math.max(0, (now - t.lastPlayed) / 86400)
+      s += Math.max(0, 60 - ageDays * 3)
+    }
+    const h = (((t.id * 2654435761) ^ ((seed + 1) * 1013904223)) >>> 0) / 4294967295
+    s += h * 40
+    return { track: t, score: s }
+  })
+  scored.sort((a, b) => b.score - a.score)
+
+  // Spread same-artist tracks slightly so the initial strip has great variety while preserving order
+  const out: Track[] = []
+  const deferred: Track[] = []
+  const recentArtistCount = new Map<string, number>()
+  for (const item of scored) {
+    const primary = norm(splitArtists(item.track.artist)[0] ?? '')
+    const cnt = recentArtistCount.get(primary) ?? 0
+    if (cnt < 2) {
+      out.push(item.track)
+      recentArtistCount.set(primary, cnt + 1)
+    } else {
+      deferred.push(item.track)
+    }
+  }
+  return [...out, ...deferred]
+}
+
 export function samplePool(pool: Track[], seed = 0, limit = 12): Track[] {
-  if (pool.length <= limit) return pool
-  if (seed === 0) return pool.slice(0, limit)
+  if (pool.length === 0) return []
+  const s = (seed + 1) * 1013904223
   return pool
-    .map((t, idx) => {
-      const h = (((t.id * 2654435761 + idx * 374761393) ^ (seed * 1013904223)) >>> 0)
+    .map((t) => {
+      const h = (((t.id * 2654435761) ^ s) >>> 0)
       return { t, h }
     })
     .sort((a, b) => a.h - b.h)

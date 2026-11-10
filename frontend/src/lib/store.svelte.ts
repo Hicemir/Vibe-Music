@@ -1,13 +1,14 @@
 import * as Go from '../../wailsjs/go/main/App'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
+import { buildRadioMix } from './util'
 import type {
-  Track, Playlist, PlayerState, QueueEntry, Settings, DownloadJob, YtdlpStatus, Route, MenuItem,
+  Track, Playlist, PlayerState, QueueEntry, Settings, DownloadJob, YtdlpStatus, Route, MenuItem, DiscoverItem,
 } from './types'
 
 export { Go }
 
 const emptyPlayer: PlayerState = {
-  trackId: 0, playing: false, loaded: false, position: 0, duration: 0, volume: 80, muted: false,
+  trackId: 0, playlistId: 0, playing: false, loaded: false, position: 0, duration: 0, volume: 80, muted: false,
   shuffle: false, repeat: 'off', queueIndex: -1, queueLen: 0, hasNext: false, hasPrev: false,
   sleepAt: 0, sleepEnd: false,
 }
@@ -23,14 +24,19 @@ class Core {
   tracks = $state.raw<Track[]>([])
   byId = $state.raw<Map<number, Track>>(new Map())
   playlists = $state.raw<Playlist[]>([])
+  playlistTrackMap = $state.raw<Record<number, number[]>>({})
   player = $state.raw<PlayerState>(emptyPlayer)
   queue = $state.raw<QueueEntry[]>([])
+  radioSeed = $state.raw<{ trackId: number; mode: 'all' | 'familiar' | 'rediscover' | 'artist' } | null>(null)
+  discoverItems = $state.raw<DiscoverItem[]>([])
+  discoverLoading = $state(false)
+  discoverSeed = $state(0)
   settings = $state.raw<Settings | null>(null)
   downloads = $state.raw<DownloadJob[]>([])
   ytdlp = $state.raw<YtdlpStatus>({ state: 'idle', version: '', path: '', message: '' })
   scan = $state.raw({ scanning: false, done: 0, total: 0 })
   loaded = $state(false)
-  version = $state('0.2.0')
+  version = $state('0.4.0')
   windowMaximised = $state(true)
   coverExpanded = $state(false)
 
@@ -61,6 +67,29 @@ class Core {
   }
   async loadPlaylists() {
     this.playlists = ((await Go.GetPlaylists()) as unknown as Playlist[]) ?? []
+    try {
+      const m = (await (Go as any).GetAllPlaylistTracks?.()) as Record<number, number[]> | undefined
+      if (m) this.playlistTrackMap = m
+    } catch {}
+  }
+
+  async fetchOnlineDiscover(append = false) {
+    if (this.discoverLoading) return
+    this.discoverLoading = true
+    try {
+      const seed = append || this.discoverItems.length > 0 ? ++this.discoverSeed : this.discoverSeed
+      const items = (((await (Go as any).GetOnlineDiscovery?.(seed)) as DiscoverItem[]) ?? [])
+      if (append) {
+        const seen = new Set(this.discoverItems.map((x) => x.videoId))
+        const fresh = items.filter((x) => !seen.has(x.videoId))
+        this.discoverItems = [...this.discoverItems, ...fresh]
+      } else {
+        this.discoverItems = items
+      }
+    } catch {
+    } finally {
+      this.discoverLoading = false
+    }
   }
 
   // ----- navigation -----
@@ -150,10 +179,50 @@ class Core {
   }
 
   // ----- playback shortcuts -----
-  play(ids: number[], start = -1, opts: { shuffle?: boolean; playlistId?: number } = {}) {
+  play(ids: number[], start = -1, opts: { shuffle?: boolean; playlistId?: number; keepRadio?: boolean } = {}) {
     if (!ids.length) return
+    if (!opts.keepRadio) this.radioSeed = null
     const shuffle = opts.shuffle ?? this.player.shuffle
     Go.PlayTracks(ids, start, shuffle, opts.playlistId ?? 0)
+  }
+  async togglePlaylist(id: number, shuffle?: boolean) {
+    if (this.player.playlistId === id && this.player.queueLen > 0) {
+      if (this.player.playing) Go.Pause()
+      else Go.Resume()
+      return
+    }
+    const ids = ((await Go.GetPlaylistTrackIDs(id)) as number[]) ?? []
+    this.play(ids, -1, { playlistId: id, shuffle })
+  }
+  toggleLikedSongs() {
+    if (this.player.playlistId === -1 && this.player.queueLen > 0) {
+      if (this.player.playing) Go.Pause()
+      else Go.Resume()
+      return
+    }
+    const ids = this.tracks.filter((t) => t.liked).map((t) => t.id)
+    this.play(ids, -1, { playlistId: -1 })
+  }
+  startRadio(seedTrack: Track, mode: 'all' | 'familiar' | 'rediscover' | 'artist' = 'all') {
+    const mix = buildRadioMix(seedTrack, this.tracks, this.playlistTrackMap, mode, 25)
+    this.radioSeed = { trackId: seedTrack.id, mode }
+    this.play(
+      mix.map((x) => x.id),
+      0,
+      { shuffle: false, keepRadio: true },
+    )
+    this.toast(`Started radio mix for “${seedTrack.title}”`)
+  }
+  setRadioMode(mode: 'all' | 'familiar' | 'rediscover' | 'artist') {
+    if (!this.radioSeed) return
+    const seedTrack = this.byId.get(this.radioSeed.trackId) ?? this.current
+    if (!seedTrack) return
+    this.radioSeed = { trackId: seedTrack.id, mode }
+    const mix = buildRadioMix(seedTrack, this.tracks, this.playlistTrackMap, mode, 25)
+    const curId = this.player.trackId || seedTrack.id
+    const upcomingIds = mix.map((x) => x.id).filter((id) => id !== curId)
+    Go.ClearQueue()
+    if (upcomingIds.length > 0) Go.AddToQueue(upcomingIds)
   }
   playInstant(id: number) {
     Go.PlayInstant(id)

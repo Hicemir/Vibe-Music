@@ -74,6 +74,8 @@ static int vm_hit_resize_edge(GtkWindow *win, gdouble x, gdouble y, GdkWindowEdg
 	int right = x >= (w - b);
 	int top = y < b;
 	int bottom = y >= (h - b);
+	// Reserve the top-right 140x36 window control area so the corner close button always receives clicks
+	if (y < 36 && x >= (w - 140)) return 0;
 	if (top && left) { *out_edge = GDK_WINDOW_EDGE_NORTH_WEST; return 1; }
 	if (top && right) { *out_edge = GDK_WINDOW_EDGE_NORTH_EAST; return 1; }
 	if (bottom && left) { *out_edge = GDK_WINDOW_EDGE_SOUTH_WEST; return 1; }
@@ -111,10 +113,11 @@ static gboolean vm_on_button_press(GtkWidget *widget, GdkEventButton *event, gpo
 	}
 
 	if (event->button == 1 && event->type == GDK_BUTTON_PRESS) {
+		int w = gtk_widget_get_allocated_width(GTK_WIDGET(win));
 		vm_drag_start_x = event->x_root;
 		vm_drag_start_y = event->y_root;
-		// Top 10px window margin is always draggable; inside .topbar JS calls ArmWindowDrag()
-		vm_drag_armed = (event->y >= 0 && event->y <= 10) ? 1 : 0;
+		// Top 10px window margin (except top-right 140px window buttons) is draggable; inside .topbar JS calls ArmWindowDrag()
+		vm_drag_armed = (event->y >= 0 && event->y <= 10 && event->x < (w - 140)) ? 1 : 0;
 	}
 
 	return FALSE;
@@ -521,7 +524,7 @@ func ensureDesktopIntegration() {
 
 	exe, err := os.Executable()
 	if err != nil || exe == "" {
-		exe = "/home/hicemir/Projects/vibeMusic/build/bin/vibeMusic"
+		exe = "/home/hicemir/Projects/vibeMusic/build/bin/VibeMusic"
 	} else if real, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = real
 	}

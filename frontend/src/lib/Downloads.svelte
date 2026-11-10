@@ -59,6 +59,24 @@
     <button class:on={mode === 'track'} onclick={() => (mode = 'track')}>Track</button>
     <button class:on={mode === 'playlist'} onclick={() => (mode = 'playlist')}>Playlist</button>
   </div>
+  {#if core.settings?.cookieBrowser}
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <button
+        class="btn ghost"
+        disabled={busy}
+        onclick={async () => {
+          busy = true
+          const err = await Go.StartDownload('https://music.youtube.com/playlist?list=LM', 'playlist')
+          busy = false
+          if (err) core.toast(err)
+          else core.toast('Syncing YouTube Liked Music (will also mark tracks as ♥ Liked)')
+        }}
+      >
+        <Icon name="heart-fill" size={16} /> Import My YT Liked Music ({core.settings.cookieBrowser})
+      </button>
+      <span class="hint">Connected to {core.settings.cookieBrowser} session — private playlists & Liked Music enabled.</span>
+    </div>
+  {/if}
   <div class="dl-row">
     <input
       class="pill-input"

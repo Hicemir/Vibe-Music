@@ -42,12 +42,20 @@ export function ExportPlaylist(arg1, arg2) {
   return window['go']['main']['App']['ExportPlaylist'](arg1, arg2);
 }
 
+export function GetAllPlaylistTracks() {
+  return window['go']['main']['App']['GetAllPlaylistTracks']();
+}
+
 export function GetDownloads() {
   return window['go']['main']['App']['GetDownloads']();
 }
 
 export function GetLyrics(arg1) {
   return window['go']['main']['App']['GetLyrics'](arg1);
+}
+
+export function GetOnlineDiscovery(arg1) {
+  return window['go']['main']['App']['GetOnlineDiscovery'](arg1);
 }
 
 export function GetPlayerState() {
@@ -116,6 +124,10 @@ export function OnAudioPause(arg1) {
 
 export function OnAudioTime(arg1, arg2) {
   return window['go']['main']['App']['OnAudioTime'](arg1, arg2);
+}
+
+export function OpenInBrowser(arg1) {
+  return window['go']['main']['App']['OpenInBrowser'](arg1);
 }
 
 export function Pause() {
@@ -216,6 +228,10 @@ export function ShowWindow() {
 
 export function StartDownload(arg1, arg2) {
   return window['go']['main']['App']['StartDownload'](arg1, arg2);
+}
+
+export function StartDownloadToPlaylist(arg1, arg2) {
+  return window['go']['main']['App']['StartDownloadToPlaylist'](arg1, arg2);
 }
 
 export function ToggleLike(arg1) {

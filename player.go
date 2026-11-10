@@ -20,6 +20,7 @@ type QueueEntry struct {
 
 type PlayerState struct {
 	TrackID    int64   `json:"trackId"`
+	PlaylistID int64   `json:"playlistId"`
 	Playing    bool    `json:"playing"`
 	Loaded     bool    `json:"loaded"`
 	Position   float64 `json:"position"`
@@ -274,6 +275,7 @@ func (p *Player) applyVolumeLocked() {
 
 func (p *Player) snapshotLocked() (PlayerState, Track, bool) {
 	st := PlayerState{
+		PlaylistID: p.playlist,
 		Playing: p.playing, Loaded: p.loaded, Position: p.pos, Duration: p.dur, Volume: p.volume, Muted: p.muted,
 		Shuffle: p.shuffle, Repeat: p.repeat, QueueIndex: p.idx, QueueLen: len(p.items),
 		SleepEnd: p.sleepEnd,

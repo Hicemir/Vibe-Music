@@ -22,9 +22,13 @@ export function DeletePlaylist(arg1:number):Promise<void>;
 
 export function ExportPlaylist(arg1:number,arg2:string):Promise<string>;
 
+export function GetAllPlaylistTracks():Promise<Record<number, Array<number>>>;
+
 export function GetDownloads():Promise<Array<main.DownloadJob>>;
 
 export function GetLyrics(arg1:number):Promise<main.Lyrics>;
+
+export function GetOnlineDiscovery(arg1:number):Promise<Array<main.DiscoverItem>>;
 
 export function GetPlayerState():Promise<main.PlayerState>;
 
@@ -59,6 +63,8 @@ export function OnAudioLoaded(arg1:number):Promise<void>;
 export function OnAudioPause(arg1:boolean):Promise<void>;
 
 export function OnAudioTime(arg1:number,arg2:number):Promise<void>;
+
+export function OpenInBrowser(arg1:string):Promise<void>;
 
 export function Pause():Promise<void>;
 
@@ -109,6 +115,8 @@ export function ShowInFolder(arg1:number):Promise<void>;
 export function ShowWindow():Promise<void>;
 
 export function StartDownload(arg1:string,arg2:string):Promise<string>;
+
+export function StartDownloadToPlaylist(arg1:string,arg2:number):Promise<string>;
 
 export function ToggleLike(arg1:number):Promise<boolean>;
 

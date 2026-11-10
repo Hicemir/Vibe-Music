@@ -34,15 +34,64 @@
       <button class="icon-btn" style="width:28px;height:28px" onclick={() => (core.modal = { type: 'newPlaylist' })} title="New playlist" aria-label="New playlist"><Icon name="plus" size={20} /></button>
     </div>
     <div class="lib-list">
-      <button class="pl-item" class:active={r.name === 'liked'} onclick={() => core.go({ name: 'liked' })}>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div
+        class="pl-item"
+        class:active={r.name === 'liked'}
+        class:playing={core.player.playlistId === -1}
+        role="button"
+        tabindex="0"
+        onclick={() => core.go({ name: 'liked' })}
+        onkeydown={(e) => e.key === 'Enter' && core.go({ name: 'liked' })}
+      >
         <Cover icon="heart-fill" class="thumb" />
-        <div class="meta"><div class="n">Liked Songs</div><div class="s">{core.tracks.filter((t) => t.liked).length} songs</div></div>
-      </button>
-      {#each sorted as p (p.id)}
-        <button class="pl-item" class:active={r.name === 'playlist' && Number(r.id) === p.id} onclick={() => core.go({ name: 'playlist', id: p.id })}>
-          <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" />
-          <div class="meta"><div class="n">{p.name}</div><div class="s">{p.trackCount} songs</div></div>
+        <div class="meta">
+          <div class="n">{'Liked Songs'}</div>
+          <div class="s">{core.tracks.filter((t) => t.liked).length} songs</div>
+        </div>
+        <button
+          class="pl-play-btn"
+          class:playing={core.player.playlistId === -1 && core.player.playing}
+          onclick={(e) => {
+            e.stopPropagation()
+            core.toggleLikedSongs()
+          }}
+          title={core.player.playlistId === -1 && core.player.playing ? 'Pause' : 'Play'}
+          aria-label={core.player.playlistId === -1 && core.player.playing ? 'Pause' : 'Play'}
+        >
+          <Icon name={core.player.playlistId === -1 && core.player.playing ? 'pause' : 'play'} size={18} />
         </button>
+      </div>
+      {#each sorted as p (p.id)}
+        {@const isPlPlaying = core.player.playlistId === p.id && core.player.playing}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div
+          class="pl-item"
+          class:active={r.name === 'playlist' && Number(r.id) === p.id}
+          class:playing={core.player.playlistId === p.id}
+          role="button"
+          tabindex="0"
+          onclick={() => core.go({ name: 'playlist', id: p.id })}
+          onkeydown={(e) => e.key === 'Enter' && core.go({ name: 'playlist', id: p.id })}
+        >
+          <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" />
+          <div class="meta">
+            <div class="n">{p.name}</div>
+            <div class="s">{p.trackCount} songs</div>
+          </div>
+          <button
+            class="pl-play-btn"
+            class:playing={isPlPlaying}
+            onclick={(e) => {
+              e.stopPropagation()
+              core.togglePlaylist(p.id)
+            }}
+            title={isPlPlaying ? 'Pause' : 'Play'}
+            aria-label={isPlPlaying ? 'Pause' : 'Play'}
+          >
+            <Icon name={isPlPlaying ? 'pause' : 'play'} size={18} />
+          </button>
+        </div>
       {/each}
     </div>
   </div>

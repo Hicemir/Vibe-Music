@@ -42,6 +42,7 @@
     'chevron-up': 'M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z',
     'chevron-down': 'M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z',
     sort: 'M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z',
+    external: 'M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z',
     blank: '',
   }
   let { name, size = 24, class: cls = '' }: { name: string; size?: number; class?: string } = $props()

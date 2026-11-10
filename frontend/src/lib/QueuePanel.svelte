@@ -10,6 +10,13 @@
   const idx = $derived(core.player.queueIndex)
   const current = $derived(core.queue[idx])
   const upcoming = $derived(core.queue.slice(idx + 1).map((e, i) => ({ e, i: idx + 1 + i })))
+  const radioSeedTrack = $derived(core.radioSeed ? core.byId.get(core.radioSeed.trackId) : undefined)
+  const radioModes: { id: 'all' | 'familiar' | 'rediscover' | 'artist'; label: string }[] = [
+    { id: 'all', label: 'All Mix' },
+    { id: 'familiar', label: 'Familiar' },
+    { id: 'rediscover', label: 'Rediscover' },
+    { id: 'artist', label: 'Same Artist' },
+  ]
 </script>
 
 <div class="panel">
@@ -23,9 +30,22 @@
       if (!(e.target as HTMLElement).closest('button')) Go.ToggleMaximiseWindow()
     }}
   >
-    <span>Queue</span>
+    <span>{radioSeedTrack ? `${radioSeedTrack.title} Mix` : 'Queue'}</span>
     <button class="icon-btn" onclick={() => (core.panel = 'none')} aria-label="Close"><Icon name="close" size={20} /></button>
   </div>
+  {#if core.radioSeed}
+    <div class="radio-pills">
+      {#each radioModes as m}
+        <button
+          class="radio-pill"
+          class:active={core.radioSeed.mode === m.id}
+          onclick={() => core.setRadioMode(m.id)}
+        >
+          {m.label}
+        </button>
+      {/each}
+    </div>
+  {/if}
   <div class="panel-body">
     {#if core.queue.length === 0}
       <div class="empty"><div class="big">Your queue is empty</div>Play something, or right-click a song and choose “Add to queue”.</div>

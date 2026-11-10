@@ -5,11 +5,6 @@
   const liked = $derived(core.tracks.filter((t) => t.liked))
   const likedCovers = $derived(liked.filter((t) => t.hasCover).slice(0, 4).map((t) => t.id))
 
-  async function playPlaylist(id: number, shuffle?: boolean) {
-    const ids = ((await Go.GetPlaylistTrackIDs(id)) as number[]) ?? []
-    core.play(ids, -1, { playlistId: id, shuffle })
-  }
-
   async function importM3U() {
     const err = await Go.ImportM3U()
     if (err) core.toast(err)
@@ -30,8 +25,9 @@
     sub="{liked.length} songs"
     ids={likedCovers.length ? likedCovers : null}
     icon="heart-fill"
+    playing={core.player.playlistId === -1 && core.player.playing}
     onclick={() => core.go({ name: 'liked' })}
-    onplay={() => core.play(liked.map((t) => t.id), -1)}
+    onplay={() => core.toggleLikedSongs()}
   />
   {#each core.playlists as p (p.id)}
     <Card
@@ -39,8 +35,9 @@
       sub="{p.trackCount} songs"
       ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null}
       icon="library"
+      playing={core.player.playlistId === p.id && core.player.playing}
       onclick={() => core.go({ name: 'playlist', id: p.id })}
-      onplay={() => playPlaylist(p.id)}
+      onplay={() => core.togglePlaylist(p.id)}
     />
   {/each}
   <button class="card" style="display:grid;place-items:center;min-height:200px;border:2px dashed var(--border);background:transparent;color:var(--text-dim)" onclick={() => (core.modal = { type: 'newPlaylist' })}>

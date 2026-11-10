@@ -11,7 +11,15 @@
     if (r.name === 'playlist') {
       void core.playlists
       const id = Number(r.id)
-      Go.GetPlaylistTrackIDs(id).then((x) => (plIds = (x as number[]) ?? []))
+      const cached = core.playlistTrackMap[id]
+      if (cached && plIds.length === 0) {
+        plIds = cached
+      }
+      Go.GetPlaylistTrackIDs(id).then((x) => {
+        const next = (x as number[]) ?? []
+        plIds = next
+        core.playlistTrackMap = { ...core.playlistTrackMap, [id]: next }
+      })
     }
   })
 
@@ -59,20 +67,26 @@
   const icon = $derived(r.name === 'liked' ? 'heart-fill' : r.name === 'artist' ? 'person' : r.name === 'album' ? 'album' : 'note')
 
   function reorder(from: number, to: number) {
+    const id = Number(r.id)
     const a = plIds.slice()
     const [m] = a.splice(from, 1)
     a.splice(to, 0, m)
     plIds = a
-    Go.SetPlaylistTracks(Number(r.id), a)
+    core.playlistTrackMap = { ...core.playlistTrackMap, [id]: a }
+    Go.SetPlaylistTracks(id, a)
   }
   function remove(t: Track) {
+    const id = Number(r.id)
     plIds = plIds.filter((x) => x !== t.id)
-    Go.SetPlaylistTracks(Number(r.id), plIds)
+    core.playlistTrackMap = { ...core.playlistTrackMap, [id]: plIds }
+    Go.SetPlaylistTracks(id, plIds)
   }
   async function addTrack(t: Track) {
+    const id = Number(r.id)
     if (plIds.includes(t.id)) return
     plIds = [...plIds, t.id]
-    await Go.AddToPlaylist(Number(r.id), [t.id])
+    core.playlistTrackMap = { ...core.playlistTrackMap, [id]: plIds }
+    await Go.AddToPlaylist(id, [t.id])
   }
 </script>
 

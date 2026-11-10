@@ -93,7 +93,13 @@ type Settings struct {
 	WindowWidth     int       `json:"windowWidth"`
 	WindowHeight    int       `json:"windowHeight"`
 	WindowMaximised bool      `json:"windowMaximised"`
+	HomeOrder       []string  `json:"homeOrder"`
+	HomeHidden      []string  `json:"homeHidden"`
+	QuickPicksRows  string    `json:"quickPicksRows"` // "1" | "2" | "3" | "auto"
+	CookieBrowser   string    `json:"cookieBrowser"`  // "" | "firefox" | "brave" | "chrome" | "chromium" | "edge" | "vivaldi"
 }
+
+var defaultHomeOrder = []string{"recentPlaylists", "topTracks", "quickPicks", "discover", "recentlyAdded", "allMusic"}
 
 func defaultSettings() Settings {
 	home, _ := os.UserHomeDir()
@@ -110,6 +116,10 @@ func defaultSettings() Settings {
 		WindowWidth:     1500,
 		WindowHeight:    920,
 		WindowMaximised: true,
+		HomeOrder:       append([]string(nil), defaultHomeOrder...),
+		HomeHidden:      []string{"discover"},
+		QuickPicksRows:  "1",
+		CookieBrowser:   "",
 	}
 }
 
@@ -201,6 +211,23 @@ func (s *Store) LoadSettings() Settings {
 		set.WindowWidth = 1500
 		set.WindowHeight = 920
 		set.WindowMaximised = true
+	}
+	if len(set.HomeOrder) == 0 {
+		set.HomeOrder = append([]string(nil), defaultHomeOrder...)
+		set.HomeHidden = []string{"discover"}
+	} else {
+		seen := map[string]bool{}
+		for _, k := range set.HomeOrder {
+			seen[k] = true
+		}
+		for _, k := range defaultHomeOrder {
+			if !seen[k] {
+				set.HomeOrder = append(set.HomeOrder, k)
+			}
+		}
+	}
+	if set.QuickPicksRows == "" {
+		set.QuickPicksRows = "1"
 	}
 	return set
 }
@@ -441,6 +468,22 @@ func (s *Store) PlaylistTrackIDs(id int64) ([]int64, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) AllPlaylistTracks() map[int64][]int64 {
+	rows, err := s.db.Query(`SELECT playlist_id, track_id FROM playlist_tracks ORDER BY playlist_id, position`)
+	if err != nil {
+		return map[int64][]int64{}
+	}
+	defer rows.Close()
+	out := map[int64][]int64{}
+	for rows.Next() {
+		var pid, tid int64
+		if err := rows.Scan(&pid, &tid); err == nil {
+			out[pid] = append(out[pid], tid)
+		}
+	}
+	return out
 }
 
 func (s *Store) SetPlaylistTracks(id int64, ids []int64) error {

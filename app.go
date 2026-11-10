@@ -207,7 +207,15 @@ func (a *App) CloseWindow() {
 }
 
 func (a *App) GetVersion() string {
-	return "0.2.0"
+	return "0.4.0"
+}
+
+func (a *App) OpenInBrowser(url string) {
+	url = strings.TrimSpace(url)
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return
+	}
+	wr.BrowserOpenURL(a.ctx, url)
 }
 
 func (a *App) QuitApp() {
@@ -317,6 +325,10 @@ func (a *App) GetPlaylistTrackIDs(id int64) []int64 {
 	return ids
 }
 
+func (a *App) GetAllPlaylistTracks() map[int64][]int64 {
+	return a.store.AllPlaylistTracks()
+}
+
 func (a *App) CreatePlaylist(name string, trackIDs []int64) int64 {
 	id, err := a.store.CreatePlaylist(name)
 	if err != nil {
@@ -370,6 +382,26 @@ func (a *App) addFilesToPlaylist(name string, files []string) {
 	}
 	_, _ = a.store.AddToPlaylist(id, ids)
 	a.emit("playlists:changed")
+}
+
+func (a *App) likeFiles(files []string) {
+	changed := false
+	for _, f := range files {
+		if t, ok := a.store.TrackByPath(f); ok && !t.Liked {
+			_ = a.store.SetLiked(t.ID, true)
+			a.trMu.Lock()
+			if cur, exists := a.tracks[t.ID]; exists {
+				cur.Liked = true
+				a.tracks[t.ID] = cur
+			}
+			a.trMu.Unlock()
+			a.emit("track:liked", t.ID, true)
+			changed = true
+		}
+	}
+	if changed {
+		a.emit("library:changed")
+	}
 }
 
 // ImportM3U opens a file picker and creates a playlist from an .m3u/.m3u8 file.
@@ -535,6 +567,15 @@ func (a *App) SaveSettings(s Settings) Settings {
 	if s.DownloadDir == "" {
 		s.DownloadDir = s.MusicDirs[0]
 	}
+	if len(s.HomeOrder) == 0 {
+		s.HomeOrder = old.HomeOrder
+	}
+	if s.QuickPicksRows == "" {
+		s.QuickPicksRows = old.QuickPicksRows
+		if s.QuickPicksRows == "" {
+			s.QuickPicksRows = "1"
+		}
+	}
 	s.WindowWidth = old.WindowWidth
 	s.WindowHeight = old.WindowHeight
 	s.WindowMaximised = old.WindowMaximised
@@ -542,6 +583,7 @@ func (a *App) SaveSettings(s Settings) Settings {
 	a.set = s
 	a.setMu.Unlock()
 	_ = a.store.SaveSettings(s)
+	a.emit("settings:changed", s)
 	a.player.ApplySettings(s)
 	if strings.Join(old.MusicDirs, "|") != strings.Join(s.MusicDirs, "|") || old.DownloadDir != s.DownloadDir {
 		for _, d := range s.MusicDirs {
@@ -574,11 +616,20 @@ func (a *App) StartDownload(url, mode string) string {
 	}
 	return ""
 }
+func (a *App) StartDownloadToPlaylist(url string, playlistID int64) string {
+	if _, err := a.dl.AddToPlaylist(url, playlistID); err != nil {
+		return err.Error()
+	}
+	return ""
+}
 func (a *App) CancelDownload(id int64)     { a.dl.Cancel(id) }
 func (a *App) GetDownloads() []DownloadJob { return a.dl.List() }
 func (a *App) ClearDownloads()             { a.dl.ClearFinished() }
 func (a *App) GetYtdlpStatus() YtdlpStatus { return a.ytdlp.Status() }
 func (a *App) UpdateYtdlp()                { go a.ytdlp.EnsureUpToDate() }
+func (a *App) GetOnlineDiscovery(seed int) []DiscoverItem {
+	return a.dl.DiscoverOnline(seed)
+}
 
 // ---------- cover art asset handler ----------
 

@@ -43,15 +43,4 @@
   {#if core.scan.scanning}
     <div class="scan-pill">Scanning library… {core.scan.done}{core.scan.total ? '/' + core.scan.total : ''}</div>
   {/if}
-  <div class="win-controls">
-    <button class="wb-btn" onclick={() => Go.MinimiseWindow()} title="Minimize" aria-label="Minimize">
-      <Icon name="chevron-down" size={18} />
-    </button>
-    <button class="wb-btn" onclick={() => Go.ToggleMaximiseWindow()} title={core.windowMaximised ? 'Restore' : 'Maximize'} aria-label="Maximize or restore">
-      <Icon name="chevron-up" size={18} />
-    </button>
-    <button class="wb-btn close" onclick={() => Go.CloseWindow()} title="Close" aria-label="Close">
-      <Icon name="close" size={18} />
-    </button>
-  </div>
 </div>

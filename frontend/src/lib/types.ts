@@ -27,6 +27,7 @@ export interface Playlist {
 
 export interface PlayerState {
   trackId: number
+  playlistId: number
   playing: boolean
   loaded: boolean
   position: number
@@ -61,6 +62,19 @@ export interface Settings {
   autoUpdateYtdlp: boolean
   closeToTray: boolean
   normalize: boolean
+  homeOrder: string[]
+  homeHidden: string[]
+  quickPicksRows: string
+  cookieBrowser: string
+}
+
+export interface DiscoverItem {
+  videoId: string
+  title: string
+  artist: string
+  duration: number
+  thumbUrl: string
+  url: string
 }
 
 export interface DownloadJob {

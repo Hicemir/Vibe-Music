@@ -36,7 +36,7 @@ class Core {
   ytdlp = $state.raw<YtdlpStatus>({ state: 'idle', version: '', path: '', message: '' })
   scan = $state.raw({ scanning: false, done: 0, total: 0 })
   loaded = $state(false)
-  version = $state('0.4.1')
+  version = $state('0.4.2')
   windowMaximised = $state(true)
   coverExpanded = $state(false)
 

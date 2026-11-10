@@ -1,7 +1,7 @@
 <script lang="ts">
   import CollectionView from './CollectionView.svelte'
   import { core, Go } from './store.svelte'
-  import { buildRadioMix, hasArtist, norm } from './util'
+  import { hasArtist, norm } from './util'
   import type { DiscoverItem, Track } from './types'
 
   const r = $derived(core.route)
@@ -67,19 +67,10 @@
         const key = norm(String(r.id).split('\u0000')[0])
         return core.tracks.filter((t) => t.album && norm(t.album) === key).sort((a, b) => a.id - b.id)
       }
-      case 'artist': {
-        const name = String(r.id)
-        return core.tracks.filter((t) => hasArtist(t, name))
-      }
+      case 'artist':
       case 'artistradio': {
         const name = String(r.id)
-        const artistTracks = core.tracks.filter((t) => hasArtist(t, name))
-        if (artistTracks.length === 0) return []
-        const seed = [...artistTracks].sort((a, b) => b.playCount - a.playCount)[0]
-        const mix = buildRadioMix(seed, core.tracks, core.playlistTrackMap, 'all', 20)
-        const seen = new Set(artistTracks.map((t) => t.id))
-        const extras = mix.filter((t) => !seen.has(t.id)).slice(0, 8)
-        return [...artistTracks, ...extras]
+        return core.tracks.filter((t) => hasArtist(t, name))
       }
     }
     return []

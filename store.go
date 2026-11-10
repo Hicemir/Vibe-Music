@@ -217,15 +217,21 @@ func (s *Store) LoadSettings() Settings {
 		set.HomeOrder = append([]string(nil), defaultHomeOrder...)
 		set.HomeHidden = []string{"discover"}
 	} else {
-		seen := map[string]bool{}
+		var withoutAll []string
+		seen := map[string]bool{"allMusic": true}
 		for _, k := range set.HomeOrder {
-			seen[k] = true
-		}
-		for _, k := range defaultHomeOrder {
-			if !seen[k] {
-				set.HomeOrder = append(set.HomeOrder, k)
+			if k != "allMusic" && !seen[k] {
+				seen[k] = true
+				withoutAll = append(withoutAll, k)
 			}
 		}
+		for _, k := range defaultHomeOrder {
+			if k != "allMusic" && !seen[k] {
+				seen[k] = true
+				withoutAll = append(withoutAll, k)
+			}
+		}
+		set.HomeOrder = append(withoutAll, "allMusic")
 	}
 	if set.QuickPicksRows == "" {
 		set.QuickPicksRows = "1"

@@ -600,8 +600,13 @@ input[type=range] { accent-color: var(--accent); }
   margin-top: 1px;
 }
 .home-edit-banner { background: rgba(30,215,96,.1); border: 1px solid rgba(30,215,96,.3); color: var(--text); padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13px; }
-.home-block.editing { border: 1px dashed rgba(255,255,255,.16); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; background: rgba(255,255,255,.015); }
+.home-block.editing { border: 1px dashed rgba(255,255,255,.16); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; background: rgba(255,255,255,.015); transition: border-color .15s, background .15s, box-shadow .15s; }
+.home-block.editing[draggable="true"] { cursor: grab; }
+.home-block.editing[draggable="true"]:active { cursor: grabbing; }
+.home-block.sec-dragover { border-color: var(--accent); background: rgba(30,215,96,.06); box-shadow: inset 0 2px 0 var(--accent); }
 .sec-reorder { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-elev2); padding: 2px; border-radius: 8px; border: 1px solid var(--border); }
+.sec-drag-grip { display: grid; place-items: center; width: 26px; height: 28px; color: var(--text-dim); cursor: grab; }
+.sec-drag-grip:active { cursor: grabbing; }
 .sec-reorder .icon-btn { width: 28px; height: 28px; }
 .sec-reorder .icon-btn:disabled { opacity: .3; cursor: default; }
 .qp-rows-seg { padding: 2px; }

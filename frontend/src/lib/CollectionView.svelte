@@ -16,6 +16,9 @@
     round = false,
     icon = 'note',
     sortable = true,
+    onlineTracks = [],
+    onlineLoading = false,
+    onrefreshonline,
     onreorder,
     onremove,
     onadd,
@@ -28,6 +31,9 @@
     round?: boolean
     icon?: string
     sortable?: boolean
+    onlineTracks?: DiscoverItem[]
+    onlineLoading?: boolean
+    onrefreshonline?: () => void
     onreorder?: (from: number, to: number) => void
     onremove?: (t: Track) => void
     onadd?: (t: Track) => void
@@ -188,6 +194,32 @@
     }
   }
 
+  let radioQueued = $state<Record<string, boolean>>({})
+
+  async function downloadOnlineTrack(d: DiscoverItem) {
+    if (radioQueued[d.videoId]) return
+    radioQueued = { ...radioQueued, [d.videoId]: true }
+    const err = await Go.StartDownload(d.url, 'track')
+    if (err) {
+      core.toast(err)
+      radioQueued = { ...radioQueued, [d.videoId]: false }
+    } else {
+      core.toast(`Downloading “${d.title}”`)
+    }
+  }
+
+  async function downloadAllOnline() {
+    const pending = onlineTracks.filter((d) => !radioQueued[d.videoId])
+    if (pending.length === 0) return
+    const next = { ...radioQueued }
+    for (const d of pending) next[d.videoId] = true
+    radioQueued = next
+    for (const d of pending) {
+      await Go.StartDownload(d.url, 'track')
+    }
+    core.toast(`Queued ${pending.length} online track${pending.length === 1 ? '' : 's'} for download`)
+  }
+
   function playAll() {
     if (playlist) {
       core.togglePlaylist(playlist.id)
@@ -250,7 +282,7 @@
     <div class="kind">{kind}</div>
     <h1>{title}</h1>
     <div class="meta">
-      {tracks.length} song{tracks.length === 1 ? '' : 's'}{#if total > 0} · {fmtDuration(total)}{/if}
+      {tracks.length} local song{tracks.length === 1 ? '' : 's'}{#if onlineTracks.length > 0} · {onlineTracks.length} online discovery song{onlineTracks.length === 1 ? '' : 's'}{/if}{#if total > 0} · {fmtDuration(total)}{/if}
     </div>
   </div>
 </div>
@@ -263,6 +295,23 @@
     <Icon name="shuffle" size={30} />
   </button>
   <button class="icon-btn" onclick={moreMenu} aria-label="More options"><Icon name="more" size={30} /></button>
+  {#if onlineTracks.length > 0 || onlineLoading}
+    <button
+      class="btn ghost"
+      style="display:inline-flex;align-items:center;gap:8px"
+      disabled={onlineLoading || onlineTracks.length === 0 || onlineTracks.every((d) => radioQueued[d.videoId])}
+      onclick={downloadAllOnline}
+    >
+      <Icon name="download" size={18} />
+      <span>{onlineTracks.length > 0 && onlineTracks.every((d) => radioQueued[d.videoId]) ? 'All queued' : `Download all (${onlineTracks.length})`}</span>
+    </button>
+    {#if onrefreshonline}
+      <button class="btn ghost" style="display:inline-flex;align-items:center;gap:6px" disabled={onlineLoading} onclick={onrefreshonline}>
+        <Icon name="refresh" size={16} />
+        <span>{onlineLoading ? 'Loading online mix…' : 'Refresh online'}</span>
+      </button>
+    {/if}
+  {/if}
   {#if tracks.length > 0}
     <div class="action-right">
       {#if sortable}
@@ -288,6 +337,74 @@
   {onremove}
   showAlbum={true}
 />
+
+{#if onlineLoading && onlineTracks.length === 0}
+  <div class="pl-bottom">
+    <div class="hint" style="padding:12px 0">Fetching online radio tracks from YouTube Music…</div>
+  </div>
+{:else if onlineTracks.length > 0}
+  <div class="pl-bottom">
+    <div class="section" style="margin-top:0">
+      <div class="section-head">
+        <div>
+          <h2>Online radio discoveries</h2>
+          <div class="hint" style="margin-top:4px">Songs from YouTube Music not in your local library yet. Click a cover to preview in your browser, or download them.</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button
+            class="btn ghost"
+            style="display:inline-flex;align-items:center;gap:6px"
+            disabled={onlineTracks.every((d) => radioQueued[d.videoId])}
+            onclick={downloadAllOnline}
+          >
+            <Icon name="download" size={16} />
+            {onlineTracks.every((d) => radioQueued[d.videoId]) ? 'All queued' : 'Download all'}
+          </button>
+          {#if onrefreshonline}
+            <button class="btn ghost" style="display:inline-flex;align-items:center;gap:6px" disabled={onlineLoading} onclick={onrefreshonline}>
+              <Icon name="refresh" size={16} /> Refresh
+            </button>
+          {/if}
+        </div>
+      </div>
+      <div class="add-list">
+        {#each onlineTracks as d (d.videoId)}
+          <div class="add-row">
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div
+              class="add-thumb"
+              style="cursor:pointer"
+              onclick={() => (Go as any).OpenInBrowser?.(d.url)}
+              title="Open in browser (YouTube)"
+            >
+              <div class="cover thumb"><img src={d.thumbUrl} alt="" loading="lazy" /></div>
+              <div class="mini-play-fab" style="pointer-events:none">
+                <Icon name="external" size={14} />
+              </div>
+            </div>
+            <div class="txt">
+              <div class="t-title">{d.title}</div>
+              <div class="t-artist">{d.artist || 'YouTube Music'}</div>
+            </div>
+            <div class="t-album"><span class="badge">Online</span></div>
+            <div></div>
+            <div class="t-dur">{d.duration ? fmtTime(d.duration) : ''}</div>
+            <button
+              class="btn ghost add-btn"
+              style="display:inline-flex;align-items:center;gap:6px"
+              disabled={!!radioQueued[d.videoId]}
+              onclick={() => downloadOnlineTrack(d)}
+            >
+              <Icon name={radioQueued[d.videoId] ? 'check' : 'download'} size={15} />
+              {radioQueued[d.videoId] ? 'Queued' : 'Download'}
+            </button>
+            <div></div>
+          </div>
+        {/each}
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if playlist && onadd}
   <div class="pl-bottom">

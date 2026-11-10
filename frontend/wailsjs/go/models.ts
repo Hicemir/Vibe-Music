@@ -190,6 +190,7 @@ export namespace main {
 	    homeHidden: string[];
 	    quickPicksRows: string;
 	    cookieBrowser: string;
+	    browserBackground: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Settings(source);
@@ -216,6 +217,7 @@ export namespace main {
 	        this.homeHidden = source["homeHidden"];
 	        this.quickPicksRows = source["quickPicksRows"];
 	        this.cookieBrowser = source["cookieBrowser"];
+	        this.browserBackground = source["browserBackground"];
 	    }
 	}
 	export class Track {

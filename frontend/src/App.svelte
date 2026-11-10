@@ -200,7 +200,7 @@
           <Home />
         {:else if r.name === 'playlists'}
           <Playlists />
-        {:else if r.name === 'playlist' || r.name === 'liked' || r.name === 'recent' || r.name === 'mostplayed' || r.name === 'allsongs' || r.name === 'album' || r.name === 'artist'}
+        {:else if r.name === 'playlist' || r.name === 'liked' || r.name === 'recent' || r.name === 'mostplayed' || r.name === 'allsongs' || r.name === 'album' || r.name === 'artist' || r.name === 'artistradio'}
           <CollectionPage />
         {:else if r.name === 'albums'}
           <Groups mode="albums" />

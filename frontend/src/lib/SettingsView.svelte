@@ -41,6 +41,7 @@
     { id: 'recentPlaylists', title: 'Recent playlists', desc: 'Compact top grid of your 4 most recently played playlists.' },
     { id: 'topTracks', title: 'Your top tracks', desc: 'Horizontal shelf of your most played tracks.' },
     { id: 'quickPicks', title: 'Quick picks (Speed Dial)', desc: 'Horizontal strip of smart picks that start a local radio mix when clicked.' },
+    { id: 'artistRadios', title: 'Artist radios', desc: 'Artist radio mixes combining your local songs with online discoveries.' },
     { id: 'discover', title: 'Online Discover (You might like)', desc: 'Opt-in YouTube Music recommendations for songs not in your library yet.' },
     { id: 'recentlyAdded', title: 'Recently added', desc: 'Horizontal shelf of the newest songs added to your library.' },
     { id: 'allMusic', title: 'All your music', desc: 'Full sortable table of your entire local music pool at the bottom of Home.' },
@@ -61,7 +62,7 @@
 
   function resetHomeLayout() {
     save({
-      homeOrder: ['recentPlaylists', 'topTracks', 'quickPicks', 'discover', 'recentlyAdded', 'allMusic'],
+      homeOrder: ['recentPlaylists', 'topTracks', 'quickPicks', 'artistRadios', 'discover', 'recentlyAdded', 'allMusic'],
       homeHidden: ['discover'],
       quickPicksRows: '1',
     })
@@ -112,6 +113,20 @@
         <option value="auto">Auto (Expand when shelves hidden)</option>
         <option value="2">2x (2 rows)</option>
         <option value="3">3x (3 rows)</option>
+      </select>
+    </div>
+    <div class="set-row">
+      <div class="lbl">
+        When clicking “Open in browser” on Discover songs
+        <div class="d">Choose whether to switch focus to your browser window immediately or open the tab in the background while staying in Vibe Music.</div>
+      </div>
+      <select
+        class="pill-input"
+        value={s.browserBackground ? 'background' : 'foreground'}
+        onchange={(e) => save({ browserBackground: e.currentTarget.value === 'background' })}
+      >
+        <option value="foreground">Bring browser to front (Default)</option>
+        <option value="background">Open in background</option>
       </select>
     </div>
   </div>

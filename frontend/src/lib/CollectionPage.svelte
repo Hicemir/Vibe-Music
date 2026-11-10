@@ -1,11 +1,14 @@
 <script lang="ts">
   import CollectionView from './CollectionView.svelte'
   import { core, Go } from './store.svelte'
-  import { hasArtist, norm } from './util'
-  import type { Track } from './types'
+  import { buildRadioMix, hasArtist, norm } from './util'
+  import type { DiscoverItem, Track } from './types'
 
   const r = $derived(core.route)
   let plIds = $state<number[]>([])
+  let radioOnlineItems = $state<DiscoverItem[]>([])
+  let radioOnlineLoading = $state(false)
+  let radioOnlineSeed = $state(0)
 
   $effect(() => {
     if (r.name === 'playlist') {
@@ -20,6 +23,30 @@
         plIds = next
         core.playlistTrackMap = { ...core.playlistTrackMap, [id]: next }
       })
+    }
+  })
+
+  function loadArtistRadioOnline(artist: string, seed: number) {
+    radioOnlineLoading = true
+    ;(Go as any)
+      .GetArtistOnlineDiscovery?.(artist, seed)
+      .then((items: DiscoverItem[]) => {
+        radioOnlineItems = items ?? []
+      })
+      .catch(() => {})
+      .finally(() => {
+        radioOnlineLoading = false
+      })
+  }
+
+  $effect(() => {
+    if (r.name === 'artistradio') {
+      const artist = String(r.id)
+      radioOnlineItems = []
+      loadArtistRadioOnline(artist, radioOnlineSeed)
+    } else {
+      radioOnlineItems = []
+      radioOnlineLoading = false
     }
   })
 
@@ -44,6 +71,16 @@
         const name = String(r.id)
         return core.tracks.filter((t) => hasArtist(t, name))
       }
+      case 'artistradio': {
+        const name = String(r.id)
+        const artistTracks = core.tracks.filter((t) => hasArtist(t, name))
+        if (artistTracks.length === 0) return []
+        const seed = [...artistTracks].sort((a, b) => b.playCount - a.playCount)[0]
+        const mix = buildRadioMix(seed, core.tracks, core.playlistTrackMap, 'all', 20)
+        const seen = new Set(artistTracks.map((t) => t.id))
+        const extras = mix.filter((t) => !seen.has(t.id)).slice(0, 8)
+        return [...artistTracks, ...extras]
+      }
     }
     return []
   })
@@ -58,13 +95,24 @@
       case 'allsongs': return 'All Songs'
       case 'album': return String(r.id).split('\u0000')[0]
       case 'artist': return String(r.id)
+      case 'artistradio': return `${String(r.id)} Radio`
     }
     return ''
   })
   const kind = $derived(
-    r.name === 'album' ? 'Album' : r.name === 'artist' ? 'Artist' : r.name === 'playlist' ? 'Playlist' : 'Collection',
+    r.name === 'album'
+      ? 'Album'
+      : r.name === 'artist'
+        ? 'Artist'
+        : r.name === 'artistradio'
+          ? 'Artist Radio'
+          : r.name === 'playlist'
+            ? 'Playlist'
+            : 'Collection',
   )
-  const icon = $derived(r.name === 'liked' ? 'heart-fill' : r.name === 'artist' ? 'person' : r.name === 'album' ? 'album' : 'note')
+  const icon = $derived(
+    r.name === 'liked' ? 'heart-fill' : r.name === 'artist' || r.name === 'artistradio' ? 'person' : r.name === 'album' ? 'album' : 'note',
+  )
 
   function reorder(from: number, to: number) {
     const id = Number(r.id)
@@ -99,6 +147,9 @@
     {playlist}
     {icon}
     round={r.name === 'artist'}
+    onlineTracks={r.name === 'artistradio' ? radioOnlineItems : []}
+    onlineLoading={r.name === 'artistradio' ? radioOnlineLoading : false}
+    onrefreshonline={r.name === 'artistradio' ? () => loadArtistRadioOnline(String(r.id), ++radioOnlineSeed) : undefined}
     onreorder={r.name === 'playlist' ? reorder : undefined}
     onremove={r.name === 'playlist' ? remove : undefined}
     onadd={r.name === 'playlist' ? addTrack : undefined}

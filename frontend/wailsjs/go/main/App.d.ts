@@ -24,6 +24,8 @@ export function ExportPlaylist(arg1:number,arg2:string):Promise<string>;
 
 export function GetAllPlaylistTracks():Promise<Record<number, Array<number>>>;
 
+export function GetArtistOnlineDiscovery(arg1:string,arg2:number):Promise<Array<main.DiscoverItem>>;
+
 export function GetDownloads():Promise<Array<main.DownloadJob>>;
 
 export function GetLyrics(arg1:number):Promise<main.Lyrics>;

@@ -46,6 +46,10 @@ export function GetAllPlaylistTracks() {
   return window['go']['main']['App']['GetAllPlaylistTracks']();
 }
 
+export function GetArtistOnlineDiscovery(arg1, arg2) {
+  return window['go']['main']['App']['GetArtistOnlineDiscovery'](arg1, arg2);
+}
+
 export function GetDownloads() {
   return window['go']['main']['App']['GetDownloads']();
 }

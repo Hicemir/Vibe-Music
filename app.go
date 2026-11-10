@@ -207,7 +207,7 @@ func (a *App) CloseWindow() {
 }
 
 func (a *App) GetVersion() string {
-	return "0.4.0"
+	return "0.4.1"
 }
 
 func (a *App) OpenInBrowser(url string) {
@@ -215,7 +215,7 @@ func (a *App) OpenInBrowser(url string) {
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return
 	}
-	wr.BrowserOpenURL(a.ctx, url)
+	nativeOpenBrowser(url, a.Settings().BrowserBackground)
 }
 
 func (a *App) QuitApp() {
@@ -629,6 +629,9 @@ func (a *App) GetYtdlpStatus() YtdlpStatus { return a.ytdlp.Status() }
 func (a *App) UpdateYtdlp()                { go a.ytdlp.EnsureUpToDate() }
 func (a *App) GetOnlineDiscovery(seed int) []DiscoverItem {
 	return a.dl.DiscoverOnline(seed)
+}
+func (a *App) GetArtistOnlineDiscovery(artist string, seed int) []DiscoverItem {
+	return a.dl.DiscoverForArtist(artist, seed)
 }
 
 // ---------- cover art asset handler ----------

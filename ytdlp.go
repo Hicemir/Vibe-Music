@@ -811,3 +811,107 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 	}
 	return out
 }
+
+func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverItem {
+	path := d.app.ytdlp.Path()
+	if path == "" {
+		return []DiscoverItem{}
+	}
+	existingByID := d.existingVideoIDMap()
+	localTitles := map[string]bool{}
+	targetNorm := strings.ToLower(strings.TrimSpace(artistName))
+
+	var artistVids []string
+	var fallbackVids []string
+	d.app.trMu.RLock()
+	for _, t := range d.app.tracks {
+		localTitles[strings.ToLower(strings.TrimSpace(t.Title))] = true
+		if m := fileVidIDRe.FindStringSubmatch(t.Path); len(m) == 2 {
+			vid := m[1]
+			fallbackVids = append(fallbackVids, vid)
+			for _, a := range splitArtistsGo(t.Artist) {
+				if strings.ToLower(strings.TrimSpace(a)) == targetNorm {
+					artistVids = append(artistVids, vid)
+					break
+				}
+			}
+		}
+	}
+	d.app.trMu.RUnlock()
+
+	pool := artistVids
+	if len(pool) == 0 {
+		pool = fallbackVids
+	}
+	if len(pool) == 0 {
+		return []DiscoverItem{}
+	}
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(seed)*7919))
+	rng.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
+	chosen := pool
+	if len(chosen) > 2 {
+		chosen = chosen[:2]
+	}
+
+	set := d.app.Settings()
+	seenVid := map[string]bool{}
+	seenTitle := map[string]bool{}
+	var out []DiscoverItem
+
+	for _, vid := range chosen {
+		ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+		mixURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", vid, vid)
+		args := []string{"--flat-playlist", "-J", "--playlist-end", "24", "--no-warnings"}
+		if set.CookieBrowser != "" {
+			args = append(args, "--cookies-from-browser", set.CookieBrowser)
+		}
+		args = append(args, mixURL)
+		cmd := exec.CommandContext(ctx, path, args...)
+		setCmdHidden(cmd)
+		raw, err := cmd.Output()
+		cancel()
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		var pl ytFlatPlaylist
+		if json.Unmarshal(raw, &pl) != nil {
+			continue
+		}
+		for _, e := range pl.Entries {
+			if len(e.ID) != 11 || seenVid[e.ID] {
+				continue
+			}
+			if _, owned := existingByID[e.ID]; owned {
+				continue
+			}
+			title := strings.TrimSpace(e.Title)
+			if title == "" || title == "[Deleted video]" || title == "[Private video]" {
+				continue
+			}
+			tKey := strings.ToLower(title)
+			if localTitles[tKey] || seenTitle[tKey] {
+				continue
+			}
+			artist := strings.TrimSpace(e.Channel)
+			if artist == "" {
+				artist = strings.TrimSpace(e.Uploader)
+			}
+			artist = topicSuffixRe.ReplaceAllString(artist, "")
+			seenVid[e.ID] = true
+			seenTitle[tKey] = true
+			out = append(out, DiscoverItem{
+				VideoID:  e.ID,
+				Title:    title,
+				Artist:   artist,
+				Duration: e.Duration,
+				ThumbURL: fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", e.ID),
+				URL:      fmt.Sprintf("https://www.youtube.com/watch?v=%s", e.ID),
+			})
+			if len(out) >= 12 {
+				return out
+			}
+		}
+	}
+	return out
+}

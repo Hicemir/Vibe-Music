@@ -66,6 +66,7 @@ export interface Settings {
   homeHidden: string[]
   quickPicksRows: string
   cookieBrowser: string
+  browserBackground: boolean
 }
 
 export interface DiscoverItem {
@@ -107,7 +108,7 @@ export interface Lyrics {
 
 export type RouteName =
   | 'home' | 'search' | 'playlists' | 'playlist' | 'liked' | 'recent' | 'mostplayed' | 'allsongs'
-  | 'albums' | 'album' | 'artists' | 'artist' | 'downloads' | 'settings'
+  | 'albums' | 'album' | 'artists' | 'artist' | 'artistradio' | 'downloads' | 'settings'
 
 export interface Route {
   name: RouteName

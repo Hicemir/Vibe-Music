@@ -26,6 +26,7 @@ static gdouble vm_drag_start_x = 0;
 static gdouble vm_drag_start_y = 0;
 static int vm_edge_cursor_active = 0;
 static int vm_signals_connected = 0;
+static guint32 vm_last_event_time = 0;
 
 extern void goOnWindowGeometryChanged(int w, int h, int max);
 extern void goOnMouseNav(int dir);
@@ -89,6 +90,7 @@ static int vm_hit_resize_edge(GtkWindow *win, gdouble x, gdouble y, GdkWindowEdg
 
 static gboolean vm_on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer data) {
 	if (!event) return FALSE;
+	if (event->time) vm_last_event_time = event->time;
 
 	if (event->type == GDK_BUTTON_PRESS) {
 		if (event->button == 8) {
@@ -124,6 +126,7 @@ static gboolean vm_on_button_press(GtkWidget *widget, GdkEventButton *event, gpo
 }
 
 static gboolean vm_on_button_release(GtkWidget *widget, GdkEventButton *event, gpointer data) {
+	if (event && event->time) vm_last_event_time = event->time;
 	vm_drag_armed = 0;
 	return FALSE;
 }
@@ -415,6 +418,59 @@ static gboolean vm_mini_idle(gpointer data) {
 static void vm_set_mini(int on) {
 	g_idle_add(vm_mini_idle, GINT_TO_POINTER(on));
 }
+
+typedef struct {
+	char *url;
+	int background;
+	guint32 timestamp;
+} VmOpenUrlReq;
+
+static gboolean vm_open_url_restore_idle(gpointer data) {
+	GtkWindow *win = vm_find_window();
+	if (win) {
+		gtk_window_present_with_time(win, GDK_CURRENT_TIME);
+	}
+	return G_SOURCE_REMOVE;
+}
+
+static gboolean vm_open_url_idle(gpointer data) {
+	VmOpenUrlReq *req = (VmOpenUrlReq *)data;
+	if (!req) return G_SOURCE_REMOVE;
+	GtkWindow *win = vm_find_window();
+	if (req->background) {
+		// Launch without a startup notification token and re-present Vibe Music so it stays in front
+		g_app_info_launch_default_for_uri(req->url, NULL, NULL);
+		g_timeout_add(180, vm_open_url_restore_idle, NULL);
+		g_timeout_add(450, vm_open_url_restore_idle, NULL);
+	} else if (win) {
+		GdkWindow *gw = gtk_widget_get_window(GTK_WIDGET(win));
+		GdkDisplay *disp = gw ? gdk_window_get_display(gw) : gdk_display_get_default();
+		if (disp && gw) {
+			GdkAppLaunchContext *ctx = gdk_display_get_app_launch_context(disp);
+			gdk_app_launch_context_set_screen(ctx, gtk_window_get_screen(win));
+			gdk_app_launch_context_set_timestamp(ctx, req->timestamp ? req->timestamp : GDK_CURRENT_TIME);
+			g_app_info_launch_default_for_uri(req->url, G_APP_LAUNCH_CONTEXT(ctx), NULL);
+			g_object_unref(ctx);
+		} else {
+			gtk_show_uri_on_window(win, req->url, req->timestamp ? req->timestamp : GDK_CURRENT_TIME, NULL);
+		}
+	} else {
+		g_app_info_launch_default_for_uri(req->url, NULL, NULL);
+	}
+	free(req->url);
+	free(req);
+	return G_SOURCE_REMOVE;
+}
+
+static void vm_open_url(const char *url, int background) {
+	if (!url) return;
+	VmOpenUrlReq *req = (VmOpenUrlReq *)malloc(sizeof(VmOpenUrlReq));
+	if (!req) return;
+	req->url = strdup(url);
+	req->background = background;
+	req->timestamp = vm_last_event_time ? vm_last_event_time : GDK_CURRENT_TIME;
+	g_idle_add(vm_open_url_idle, req);
+}
 */
 import "C"
 
@@ -424,6 +480,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"unsafe"
 )
 
 //go:embed build/appicon.png
@@ -493,6 +550,16 @@ func nativeSetMini(on bool) {
 		v = 1
 	}
 	C.vm_set_mini(C.int(v))
+}
+
+func nativeOpenBrowser(url string, background bool) {
+	cs := C.CString(url)
+	defer C.free(unsafe.Pointer(cs))
+	bg := 0
+	if background {
+		bg = 1
+	}
+	C.vm_open_url(cs, C.int(bg))
 }
 
 func setCmdHidden(_ *exec.Cmd) {}

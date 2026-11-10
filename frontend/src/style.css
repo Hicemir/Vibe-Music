@@ -523,6 +523,82 @@ input[type=range] { accent-color: var(--accent); }
 .edit-home-btn { width: 34px; height: 34px; border-radius: 8px; background: var(--bg-elev2); color: var(--text-dim); border: 1px solid transparent; }
 .edit-home-btn:hover { color: var(--text); background: var(--bg-hover); }
 .edit-home-btn.active { background: rgba(30,215,96,.18); color: var(--accent); border-color: var(--accent); }
+.sec-popover-wrap { position: relative; }
+.sec-menu-btn { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; font-size: 13px; }
+.sec-menu-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(30,215,96,.08); }
+.sec-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 310px;
+  background: #1b1b26;
+  border: 1px solid #323242;
+  border-radius: 12px;
+  padding: 10px;
+  box-shadow: 0 20px 50px rgba(0,0,0,.72);
+  z-index: 800;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sec-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px 8px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 800;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.sec-popover-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sec-check-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-align: left;
+  width: 100%;
+  transition: background .12s;
+}
+.sec-check-row:hover {
+  background: var(--bg-hover);
+}
+.sec-checkbox {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1.5px solid #4e4e62;
+  background: rgba(255,255,255,.03);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #000;
+  transition: background .12s, border-color .12s;
+}
+.sec-checkbox.checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.sec-check-txt {
+  min-width: 0;
+  flex: 1;
+}
+.sec-check-txt .t {
+  font-weight: 700;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.sec-check-txt .s {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
 .home-edit-banner { background: rgba(30,215,96,.1); border: 1px solid rgba(30,215,96,.3); color: var(--text); padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; font-size: 13px; }
 .home-block.editing { border: 1px dashed rgba(255,255,255,.16); border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; background: rgba(255,255,255,.015); }
 .sec-reorder { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-elev2); padding: 2px; border-radius: 8px; border: 1px solid var(--border); }

@@ -6,15 +6,26 @@
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu } from './menus'
-  import { buildQuickPicks, fmtTime } from './util'
+  import { buildQuickPicks, fmtTime, hasArtist, norm, splitArtists } from './util'
   import type { DiscoverItem, Settings } from './types'
 
   const hour = new Date().getHours()
   const greeting = hour < 5 ? 'Late night vibes' : hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
 
-  const DEFAULT_ORDER = ['recentPlaylists', 'topTracks', 'quickPicks', 'discover', 'recentlyAdded', 'allMusic']
+  const DEFAULT_ORDER = ['recentPlaylists', 'topTracks', 'quickPicks', 'artistRadios', 'discover', 'recentlyAdded', 'allMusic']
+
+  const SECTION_LIST: { id: string; title: string; sub: string }[] = [
+    { id: 'recentPlaylists', title: 'Recent playlists', sub: 'Top 4 recently played playlists' },
+    { id: 'topTracks', title: 'Your top tracks', sub: 'Most played songs shelf' },
+    { id: 'quickPicks', title: 'Quick picks', sub: 'Instant local radio mix cards' },
+    { id: 'artistRadios', title: 'Artist radios', sub: 'Artist mixes + online discovery' },
+    { id: 'discover', title: 'Discover new music', sub: 'YouTube Music online suggestions' },
+    { id: 'recentlyAdded', title: 'Recently added', sub: 'Newest tracks in your library' },
+    { id: 'allMusic', title: 'All your music', sub: 'Full library table at the bottom' },
+  ]
 
   let editingLayout = $state(false)
+  let showSectionsMenu = $state(false)
   let qpSeed = $state(0)
   let qpCols = $state(6)
   let qpScroller: HTMLDivElement | undefined = $state()
@@ -66,6 +77,29 @@
       .slice(0, 14),
   )
 
+  const artistRadios = $derived.by(() => {
+    const map = new Map<string, { name: string; score: number; count: number; covers: number[]; trackIds: number[] }>()
+    for (const t of core.tracks) {
+      const sc = t.playCount * 10 + (t.liked ? 25 : 0) + 1
+      for (const a of splitArtists(t.artist)) {
+        if (!a || a === 'Unknown Artist') continue
+        const k = norm(a)
+        let entry = map.get(k)
+        if (!entry) {
+          entry = { name: a, score: 0, count: 0, covers: [], trackIds: [] }
+          map.set(k, entry)
+        }
+        entry.score += sc
+        entry.count++
+        entry.trackIds.push(t.id)
+        if (t.hasCover && entry.covers.length < 4 && !entry.covers.includes(t.id)) {
+          entry.covers.push(t.id)
+        }
+      }
+    }
+    return [...map.values()].sort((a, b) => b.score - a.score).slice(0, 10)
+  })
+
   $effect(() => {
     if (!hiddenSet.has('discover') && core.discoverItems.length === 0 && !core.discoverLoading && core.tracks.length > 0) {
       core.fetchOnlineDiscover(false)
@@ -101,6 +135,13 @@
     saveSettingsPatch({ quickPicksRows: mode })
   }
 
+  function toggleHomeSection(id: string) {
+    const cur = new Set(core.settings?.homeHidden ?? ['discover'])
+    if (cur.has(id)) cur.delete(id)
+    else cur.add(id)
+    saveSettingsPatch({ homeHidden: [...cur] })
+  }
+
   async function loadMoreQuickPicks() {
     qpCols += 4
     await tick()
@@ -130,25 +171,65 @@
   }
 </script>
 
-<div class="view-head">
+<div class="view-head" style="display:flex;align-items:center;justify-content:space-between;gap:12px">
   <div class="view-title">{greeting}</div>
-  <div style="display:flex;align-items:center;gap:8px">
+  <div style="display:flex;align-items:center;gap:8px;position:relative">
     {#if editingLayout}
-      <button class="btn ghost" onclick={() => core.go({ name: 'settings' })}>
-        <Icon name="settings" size={16} /> Add / Remove Sections
-      </button>
+      <div class="sec-popover-wrap">
+        <button
+          class="btn ghost sec-menu-btn"
+          class:active={showSectionsMenu}
+          onclick={(e) => {
+            e.stopPropagation()
+            showSectionsMenu = !showSectionsMenu
+          }}
+        >
+          <Icon name="settings" size={16} />
+          <span>Add / Remove Sections</span>
+          <Icon name="chevron-down" size={16} />
+        </button>
+
+        {#if showSectionsMenu}
+          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+          <div class="sec-popover" onclick={(e) => e.stopPropagation()}>
+            <div class="sec-popover-head">
+              <span>Home Sections</span>
+              <button class="link-btn" onclick={() => { showSectionsMenu = false; core.go({ name: 'settings' }) }}>All settings →</button>
+            </div>
+            <div class="sec-popover-list">
+              {#each SECTION_LIST as item (item.id)}
+                {@const checked = !hiddenSet.has(item.id)}
+                <button class="sec-check-row" class:on={checked} onclick={() => toggleHomeSection(item.id)}>
+                  <span class="sec-checkbox" class:checked>
+                    {#if checked}<Icon name="check" size={14} />{/if}
+                  </span>
+                  <div class="sec-check-txt">
+                    <div class="t">{item.title}</div>
+                    <div class="s">{item.sub}</div>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
     {/if}
     <button
       class="icon-btn edit-home-btn"
       class:active={editingLayout}
-      onclick={() => (editingLayout = !editingLayout)}
-      title={editingLayout ? 'Done reordering Home' : 'Reorder Home sections'}
-      aria-label="Reorder Home sections"
+      onclick={() => {
+        editingLayout = !editingLayout
+        if (!editingLayout) showSectionsMenu = false
+      }}
+      title={editingLayout ? 'Done customizing Home' : 'Customize Home layout'}
+      aria-label="Customize Home layout"
     >
       <Icon name={editingLayout ? 'check' : 'edit'} size={18} />
     </button>
   </div>
 </div>
+
+<svelte:window onclick={() => { if (showSectionsMenu) showSectionsMenu = false }} />
 
 {#if editingLayout}
   <div class="home-edit-banner">
@@ -329,6 +410,39 @@
             </button>
           {/if}
         </div>
+      </div>
+    {/if}
+
+  {:else if sec === 'artistRadios'}
+    {#if artistRadios.length > 0 || editingLayout}
+      <div class="section home-block" class:editing={editingLayout}>
+        <div class="section-head">
+          <div>
+            <h2>Artist radios</h2>
+            <div class="hint" style="margin-top:2px">Non-stop artist mixes combining your local songs with new online discoveries.</div>
+          </div>
+          {@render reorderControls('artistRadios')}
+        </div>
+        {#if artistRadios.length === 0}
+          <div class="hint">Add or play some music and artist radio stations will appear here.</div>
+        {:else}
+          <div class="shelf">
+            {#each artistRadios as ar (ar.name)}
+              {@const seedTrack = core.tracks.find((t) => hasArtist(t, ar.name))}
+              <Card
+                title="{ar.name} Radio"
+                sub="{ar.count} local song{ar.count === 1 ? '' : 's'} + online mix"
+                ids={ar.covers.length > 1 ? ar.covers : null}
+                id={ar.covers.length === 1 ? ar.covers[0] : 0}
+                icon="person"
+                onclick={() => core.go({ name: 'artistradio', id: ar.name })}
+                onplay={() => {
+                  if (seedTrack) core.startRadio(seedTrack, 'artist')
+                }}
+              />
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
 

@@ -106,6 +106,19 @@ func nativeSetMini(on bool) {
 
 func ensureDesktopIntegration() {}
 
+func nativeOpenBrowser(url string, background bool) {
+	if winApp == nil || winApp.ctx == nil {
+		return
+	}
+	wr.BrowserOpenURL(winApp.ctx, url)
+	if background {
+		go func() {
+			time.Sleep(250 * time.Millisecond)
+			wr.WindowShow(winApp.ctx)
+		}()
+	}
+}
+
 func setCmdHidden(cmd *exec.Cmd) {
 	if cmd != nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}

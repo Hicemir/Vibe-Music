@@ -93,13 +93,14 @@ type Settings struct {
 	WindowWidth     int       `json:"windowWidth"`
 	WindowHeight    int       `json:"windowHeight"`
 	WindowMaximised bool      `json:"windowMaximised"`
-	HomeOrder       []string  `json:"homeOrder"`
-	HomeHidden      []string  `json:"homeHidden"`
-	QuickPicksRows  string    `json:"quickPicksRows"` // "1" | "2" | "3" | "auto"
-	CookieBrowser   string    `json:"cookieBrowser"`  // "" | "firefox" | "brave" | "chrome" | "chromium" | "edge" | "vivaldi"
+	HomeOrder         []string  `json:"homeOrder"`
+	HomeHidden        []string  `json:"homeHidden"`
+	QuickPicksRows    string    `json:"quickPicksRows"` // "1" | "2" | "3" | "auto"
+	CookieBrowser     string    `json:"cookieBrowser"`  // "" | "firefox" | "brave" | "chrome" | "chromium" | "edge" | "vivaldi"
+	BrowserBackground bool      `json:"browserBackground"`
 }
 
-var defaultHomeOrder = []string{"recentPlaylists", "topTracks", "quickPicks", "discover", "recentlyAdded", "allMusic"}
+var defaultHomeOrder = []string{"recentPlaylists", "topTracks", "quickPicks", "artistRadios", "discover", "recentlyAdded", "allMusic"}
 
 func defaultSettings() Settings {
 	home, _ := os.UserHomeDir()

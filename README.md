@@ -13,7 +13,7 @@ A fast, local-first desktop music player for Linux and Windows built with Go, Wa
 - **Customizable Home**: Reorder or toggle sections (`Recent playlists`, `Top tracks`, `Quick picks`, `Artist radios`, `Discover new music`, `Recently added`, `All music`).
 - **Quick Picks & Artist Radios**: Start local radio mixes or open hybrid **Artist Radio** stations combining your local tracks with online YouTube Music discoveries and one-click `Download all`.
 - **Smart Playlists**: Drag-to-reorder tracks, sort by any column, instant song preview without interrupting your queue, local recommendation engine, and M3U8 import/export.
-- **Online Discovery & Built-in Downloader (`yt-dlp`)**: Discover songs from YouTube Music based on your library, preview in browser, and download tracks or full playlists (`m4a`, `opus`, `mp3`) with cover art, metadata, and optional browser cookie support.
+- **Online Discovery & Built-in Downloader (`yt-dlp`)**: Discover songs from YouTube Music based on your library, preview in browser, and download tracks or full playlists (`m4a`, `opus`, `mp3`) with cover art, metadata, and option to import from youtube music.
 - **Audio & Controls**: Gapless playback, 10-band equalizer with presets, ReplayGain normalization, crossfade, synced `.lrc` lyrics, sleep timer, mini player, system tray, MPRIS2 / media keys, and an auto-hiding top window bar.
 
 ## Building from Source

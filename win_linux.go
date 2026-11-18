@@ -3,14 +3,22 @@
 package main
 
 /*
-#cgo pkg-config: gtk+-3.0
+#cgo pkg-config: gtk+-3.0 webkit2gtk-4.1 libsoup-3.0
 #include <gtk/gtk.h>
 #include <gdk/gdk.h>
 #include <gdk/gdkwayland.h>
+#include <webkit2/webkit2.h>
+#include <libsoup/soup.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 static GtkWindow *vm_win = NULL;
+static GtkWidget *vm_login_win = NULL;
+static WebKitWebView *vm_login_wv = NULL;
+static WebKitWebsiteDataManager *vm_ytm_dm = NULL;
+static WebKitWebContext *vm_ytm_ctx = NULL;
+static int vm_login_handled = 0;
 static int vm_saved_w = 1440;
 static int vm_saved_h = 880;
 static int vm_pending_w = 1440;
@@ -30,6 +38,8 @@ static guint32 vm_last_event_time = 0;
 
 extern void goOnWindowGeometryChanged(int w, int h, int max);
 extern void goOnMouseNav(int dir);
+extern int goOnYtMusicCookies(char *raw, int requireMusicHost);
+extern void goOnYtMusicLoginClosed(void);
 
 static GtkWindow* vm_find_window(void) {
 	if (vm_win != NULL && GTK_IS_WINDOW(vm_win)) {
@@ -37,7 +47,7 @@ static GtkWindow* vm_find_window(void) {
 	}
 	GList *list = gtk_window_list_toplevels();
 	for (GList *l = list; l != NULL; l = l->next) {
-		if (GTK_IS_WINDOW(l->data) && gtk_window_get_window_type(GTK_WINDOW(l->data)) == GTK_WINDOW_TOPLEVEL) {
+		if (GTK_IS_WINDOW(l->data) && l->data != (gpointer)vm_login_win && gtk_window_get_window_type(GTK_WINDOW(l->data)) == GTK_WINDOW_TOPLEVEL) {
 			vm_win = GTK_WINDOW(l->data);
 			break;
 		}
@@ -471,6 +481,229 @@ static void vm_open_url(const char *url, int background) {
 	req->timestamp = vm_last_event_time ? vm_last_event_time : GDK_CURRENT_TIME;
 	g_idle_add(vm_open_url_idle, req);
 }
+
+typedef struct {
+	char *data_dir;
+	char *cookie_file;
+} VmYtmLoginReq;
+
+static void vm_ensure_ytm_context(const char *data_dir, const char *cookie_file) {
+	if (!vm_ytm_dm) {
+		vm_ytm_dm = webkit_website_data_manager_new(
+			"base-data-directory", data_dir,
+			"base-cache-directory", data_dir,
+			NULL);
+	}
+	if (cookie_file && cookie_file[0]) {
+		WebKitCookieManager *cm = webkit_website_data_manager_get_cookie_manager(vm_ytm_dm);
+		if (cm) {
+			webkit_cookie_manager_set_persistent_storage(cm, cookie_file, WEBKIT_COOKIE_PERSISTENT_STORAGE_TEXT);
+			webkit_cookie_manager_set_accept_policy(cm, WEBKIT_COOKIE_POLICY_ACCEPT_ALWAYS);
+		}
+	}
+	if (!vm_ytm_ctx) {
+		vm_ytm_ctx = webkit_web_context_new_with_website_data_manager(vm_ytm_dm);
+	}
+}
+
+static void vm_on_cookies_ready(GObject *source, GAsyncResult *res, gpointer user_data) {
+	WebKitCookieManager *cm = WEBKIT_COOKIE_MANAGER(source);
+	int require_music_host = GPOINTER_TO_INT(user_data);
+	GError *err = NULL;
+	GList *cookies = webkit_cookie_manager_get_all_cookies_finish(cm, res, &err);
+	if (err) {
+		g_error_free(err);
+	}
+	if (!vm_login_win || !GTK_IS_WIDGET(vm_login_win) || vm_login_handled) {
+		if (cookies) g_list_free_full(cookies, (GDestroyNotify)soup_cookie_free);
+		return;
+	}
+	GString *buf = g_string_new("");
+	for (GList *l = cookies; l != NULL; l = l->next) {
+		SoupCookie *c = (SoupCookie *)l->data;
+		if (!c) continue;
+		const char *dom = soup_cookie_get_domain(c);
+		const char *path = soup_cookie_get_path(c);
+		const char *name = soup_cookie_get_name(c);
+		const char *val = soup_cookie_get_value(c);
+		gboolean sec = soup_cookie_get_secure(c);
+		if (!dom || !name || !val) continue;
+		if (strchr(dom, '\t') || strchr(dom, '\n') || strchr(name, '\t') || strchr(name, '\n') || strchr(val, '\t') || strchr(val, '\n')) {
+			continue;
+		}
+		g_string_append_printf(buf, "%s\t%s\t%d\t%s\t%s\n", dom, path ? path : "/", sec ? 1 : 0, name, val);
+	}
+	if (cookies) {
+		g_list_free_full(cookies, (GDestroyNotify)soup_cookie_free);
+	}
+	int ok = goOnYtMusicCookies(buf->str, require_music_host);
+	g_string_free(buf, TRUE);
+	if (ok && vm_login_win && GTK_IS_WIDGET(vm_login_win)) {
+		vm_login_handled = 1;
+		gtk_widget_destroy(vm_login_win);
+	}
+}
+
+static void vm_fetch_ytm_cookies(int require_music_host) {
+	if (!vm_login_win || !vm_login_wv || vm_login_handled || !vm_ytm_dm) return;
+	if (require_music_host) {
+		const gchar *uri = webkit_web_view_get_uri(vm_login_wv);
+		if (!uri || !strstr(uri, "music.youtube.com")) return;
+	}
+	WebKitCookieManager *cm = webkit_website_data_manager_get_cookie_manager(vm_ytm_dm);
+	if (cm) {
+		webkit_cookie_manager_get_all_cookies(cm, NULL, vm_on_cookies_ready, GINT_TO_POINTER(require_music_host));
+	}
+}
+
+static void vm_on_login_load_changed(WebKitWebView *wv, WebKitLoadEvent event, gpointer data) {
+	if (event == WEBKIT_LOAD_COMMITTED || event == WEBKIT_LOAD_FINISHED) {
+		vm_fetch_ytm_cookies(1);
+	}
+}
+
+static void vm_on_login_uri_changed(GObject *obj, GParamSpec *pspec, gpointer data) {
+	vm_fetch_ytm_cookies(1);
+}
+
+static GtkWidget* vm_on_login_create(WebKitWebView *wv, WebKitNavigationAction *action, gpointer data) {
+	WebKitURIRequest *req = webkit_navigation_action_get_request(action);
+	if (req) {
+		const gchar *uri = webkit_uri_request_get_uri(req);
+		if (uri) {
+			webkit_web_view_load_uri(wv, uri);
+		}
+	}
+	return NULL;
+}
+
+static void vm_on_login_done_clicked(GtkButton *btn, gpointer data) {
+	vm_fetch_ytm_cookies(0);
+}
+
+static void vm_on_login_cancel_clicked(GtkButton *btn, gpointer data) {
+	if (vm_login_win && GTK_IS_WIDGET(vm_login_win)) {
+		gtk_widget_destroy(vm_login_win);
+	}
+}
+
+static void vm_on_login_destroy(GtkWidget *w, gpointer data) {
+	vm_login_win = NULL;
+	vm_login_wv = NULL;
+	int handled = vm_login_handled;
+	vm_login_handled = 0;
+	if (!handled) {
+		goOnYtMusicLoginClosed();
+	}
+}
+
+static void vm_apply_login_css(GtkWidget *widget) {
+	static GtkCssProvider *prov = NULL;
+	if (!prov) {
+		prov = gtk_css_provider_new();
+		gtk_css_provider_load_from_data(prov,
+			".vm-login-hdr { background-color: #181822; padding: 10px 14px; border-bottom: 1px solid #2b2b38; }"
+			".vm-login-title { color: #f5f5f7; font-weight: 700; font-size: 14px; }"
+			".vm-login-done { background: #1ed760; color: #000000; border: none; border-radius: 999px; padding: 6px 16px; font-weight: 700; }"
+			".vm-login-done:hover { background: #3be477; }"
+			".vm-login-cancel { background: #2a2a36; color: #f5f5f7; border: 1px solid #3c3c4c; border-radius: 999px; padding: 6px 14px; font-weight: 600; }"
+			".vm-login-cancel:hover { background: #363646; }",
+			-1, NULL);
+	}
+	GdkScreen *scr = gtk_widget_get_screen(widget);
+	if (scr) {
+		gtk_style_context_add_provider_for_screen(scr, GTK_STYLE_PROVIDER(prov), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+	}
+}
+
+static gboolean vm_open_ytm_login_idle(gpointer data) {
+	VmYtmLoginReq *req = (VmYtmLoginReq *)data;
+	if (!req) return G_SOURCE_REMOVE;
+
+	vm_ensure_ytm_context(req->data_dir, req->cookie_file);
+	free(req->data_dir);
+	free(req->cookie_file);
+	free(req);
+
+	if (vm_login_win && GTK_IS_WIDGET(vm_login_win)) {
+		gtk_window_present(GTK_WINDOW(vm_login_win));
+		return G_SOURCE_REMOVE;
+	}
+
+	vm_login_handled = 0;
+	GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	vm_login_win = win;
+	gtk_window_set_title(GTK_WINDOW(win), "Sign in to YouTube Music");
+	gtk_window_set_default_size(GTK_WINDOW(win), 820, 680);
+	gtk_window_set_position(GTK_WINDOW(win), GTK_WIN_POS_CENTER_ON_PARENT);
+	GtkWindow *parent = vm_find_window();
+	if (parent) {
+		gtk_window_set_transient_for(GTK_WINDOW(win), parent);
+	}
+	vm_apply_login_css(win);
+
+	GtkWidget *vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+	GtkWidget *hdr = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+	gtk_style_context_add_class(gtk_widget_get_style_context(hdr), "vm-login-hdr");
+
+	GtkWidget *title = gtk_label_new("Sign in to YouTube Music");
+	gtk_widget_set_halign(title, GTK_ALIGN_START);
+	gtk_style_context_add_class(gtk_widget_get_style_context(title), "vm-login-title");
+
+	GtkWidget *done_btn = gtk_button_new_with_label("Done");
+	gtk_style_context_add_class(gtk_widget_get_style_context(done_btn), "vm-login-done");
+
+	GtkWidget *cancel_btn = gtk_button_new_with_label("Cancel");
+	gtk_style_context_add_class(gtk_widget_get_style_context(cancel_btn), "vm-login-cancel");
+
+	gtk_box_pack_start(GTK_BOX(hdr), title, TRUE, TRUE, 0);
+	gtk_box_pack_end(GTK_BOX(hdr), cancel_btn, FALSE, FALSE, 0);
+	gtk_box_pack_end(GTK_BOX(hdr), done_btn, FALSE, FALSE, 0);
+
+	GtkWidget *wv_widget = webkit_web_view_new_with_context(vm_ytm_ctx);
+	vm_login_wv = WEBKIT_WEB_VIEW(wv_widget);
+	WebKitSettings *ws = webkit_settings_new();
+	webkit_settings_set_enable_javascript(ws, TRUE);
+	webkit_settings_set_enable_html5_local_storage(ws, TRUE);
+	webkit_settings_set_user_agent(ws, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15");
+	webkit_web_view_set_settings(vm_login_wv, ws);
+	g_object_unref(ws);
+
+	gtk_box_pack_start(GTK_BOX(vbox), hdr, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(vbox), wv_widget, TRUE, TRUE, 0);
+	gtk_container_add(GTK_CONTAINER(win), vbox);
+
+	g_signal_connect(G_OBJECT(vm_login_wv), "load-changed", G_CALLBACK(vm_on_login_load_changed), NULL);
+	g_signal_connect(G_OBJECT(vm_login_wv), "notify::uri", G_CALLBACK(vm_on_login_uri_changed), NULL);
+	g_signal_connect(G_OBJECT(vm_login_wv), "create", G_CALLBACK(vm_on_login_create), NULL);
+	g_signal_connect(G_OBJECT(done_btn), "clicked", G_CALLBACK(vm_on_login_done_clicked), NULL);
+	g_signal_connect(G_OBJECT(cancel_btn), "clicked", G_CALLBACK(vm_on_login_cancel_clicked), NULL);
+	g_signal_connect(G_OBJECT(win), "destroy", G_CALLBACK(vm_on_login_destroy), NULL);
+
+	webkit_web_view_load_uri(vm_login_wv, "https://accounts.google.com/ServiceLogin?ltmpl=music&service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F");
+	gtk_widget_show_all(win);
+	gtk_window_present(GTK_WINDOW(win));
+	return G_SOURCE_REMOVE;
+}
+
+static void vm_open_ytm_login(const char *data_dir, const char *cookie_file) {
+	VmYtmLoginReq *req = (VmYtmLoginReq *)malloc(sizeof(VmYtmLoginReq));
+	if (!req) return;
+	req->data_dir = strdup(data_dir ? data_dir : "");
+	req->cookie_file = strdup(cookie_file ? cookie_file : "");
+	g_idle_add(vm_open_ytm_login_idle, req);
+}
+
+static gboolean vm_clear_ytm_cookies_idle(gpointer data) {
+	if (vm_ytm_dm) {
+		webkit_website_data_manager_clear(vm_ytm_dm, WEBKIT_WEBSITE_DATA_ALL, 0, NULL, NULL, NULL);
+	}
+	return G_SOURCE_REMOVE;
+}
+
+static void vm_clear_ytm_cookies(void) {
+	g_idle_add(vm_clear_ytm_cookies_idle, NULL);
+}
 */
 import "C"
 
@@ -517,6 +750,25 @@ func goOnMouseNav(dir C.int) {
 	}
 }
 
+//export goOnYtMusicCookies
+func goOnYtMusicCookies(raw *C.char, requireMusicHost C.int) C.int {
+	if winApp == nil || raw == nil {
+		return 0
+	}
+	if winApp.HandleWebViewCookies(C.GoString(raw), requireMusicHost != 0) {
+		return 1
+	}
+	return 0
+}
+
+//export goOnYtMusicLoginClosed
+func goOnYtMusicLoginClosed() {
+	if winApp == nil {
+		return
+	}
+	winApp.emit("ytm:login-cancelled")
+}
+
 func (a *App) initNativeWindow() {
 	winApp = a
 	ensureDesktopIntegration()
@@ -560,6 +812,20 @@ func nativeOpenBrowser(url string, background bool) {
 		bg = 1
 	}
 	C.vm_open_url(cs, C.int(bg))
+}
+
+func nativeOpenYtMusicLogin(cookieFilePath string) {
+	dd := filepath.Dir(cookieFilePath)
+	_ = os.MkdirAll(dd, 0o755)
+	cdd := C.CString(dd)
+	ccf := C.CString(cookieFilePath)
+	defer C.free(unsafe.Pointer(cdd))
+	defer C.free(unsafe.Pointer(ccf))
+	C.vm_open_ytm_login(cdd, ccf)
+}
+
+func nativeClearYtMusicCookies() {
+	C.vm_clear_ytm_cookies()
 }
 
 func setCmdHidden(_ *exec.Cmd) {}

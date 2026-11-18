@@ -3,10 +3,19 @@
   import Cover from './Cover.svelte'
   import Slider from './Slider.svelte'
   import { core, Go } from './store.svelte'
-  import { fmtTime } from './util'
+  import { clamp, fmtTime } from './util'
 
   const p = $derived(core.player)
   const t = $derived(core.current)
+
+  function onSeekWheel(e: WheelEvent) {
+    if (!p.loaded) return
+    const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? -e.deltaY : e.deltaX
+    if (delta === 0) return
+    e.preventDefault()
+    const step = delta > 0 ? 5 : -5
+    Go.Seek(clamp(p.position + step, 0, p.duration || 0))
+  }
 
   function expand() {
     core.mini = false
@@ -22,7 +31,7 @@
   }}
 >
   <div class="row1">
-    <Cover id={t && t.hasCover ? t.id : 0} class="thumb" />
+    <Cover id={t && t.hasCover ? t.id : ''} class="thumb" />
     <div class="txt">
       <div class="t-title">{t ? t.title : 'Nothing playing'}</div>
       <div class="t-artist">{t ? t.artist : ''}</div>
@@ -30,7 +39,7 @@
     <button class="icon-btn" onclick={expand} title="Back to full app" aria-label="Expand"><Icon name="expand" size={20} /></button>
     <button class="icon-btn" onclick={() => Go.CloseWindow()} title="Close" aria-label="Close"><Icon name="close" size={18} /></button>
   </div>
-  <div class="pb-seek">
+  <div class="pb-seek" onwheel={onSeekWheel}>
     <span class="tm l" style="width:34px">{fmtTime(p.position)}</span>
     <Slider value={p.position} max={p.duration || 1} disabled={!p.loaded} onchange={(v) => Go.Seek(v)} />
     <span class="tm r" style="width:34px">{fmtTime(p.duration)}</span>

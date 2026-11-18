@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Green Circular Surrounding Ring (within 66dp adaptive safe zone) -->
+    <path
+        android:pathData="M54,23 A31,31 0 1,1 53.9,23 Z"
+        android:strokeWidth="2.6"
+        android:strokeColor="#46CF68"
+        android:fillColor="#00000000" />
+
+    <!-- Equalizer Bars & Center V -->
+    <path
+        android:pathData="M37.5,44.2 L37.5,53.0"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+
+    <path
+        android:pathData="M43.3,39.4 L43.3,62.1"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+
+    <path
+        android:pathData="M49.1,52.7 L53.9,76.6 L59.4,48.5"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeColor="#46CF68"
+        android:fillColor="#00000000" />
+
+    <path
+        android:pathData="M64.7,33.9 L64.7,58.8"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+
+    <path
+        android:pathData="M70.5,41.9 L70.5,53.0"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+</vector>

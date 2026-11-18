@@ -26,7 +26,7 @@
     kind: string
     title: string
     tracks: Track[]
-    coverIds?: number[]
+    coverIds?: string[]
     playlist?: Playlist | null
     round?: boolean
     icon?: string
@@ -94,8 +94,8 @@
   const FIND_LIMIT = 12
   const SUGGEST_LIMIT = 8
 
-  let findOrderedIds = $state<number[]>([])
-  let suggestionOrderedIds = $state<number[]>([])
+  let findOrderedIds = $state<string[]>([])
+  let suggestionOrderedIds = $state<string[]>([])
   let lastFindKey = ''
   let lastRecKey = ''
 
@@ -232,7 +232,7 @@
     core.play(ids, -1, { playlistId })
   }
   function shuffleAll() {
-    core.play(ids, -1, { shuffle: true, playlistId })
+    Go.SetShuffle(!core.player.shuffle)
   }
 
   function moreMenu(e: MouseEvent) {
@@ -291,7 +291,7 @@
   <button class="big-play" onclick={playAll} disabled={tracks.length === 0} aria-label="Play">
     <Icon name={isCurrentCollection ? 'pause' : 'play'} size={32} />
   </button>
-  <button class="icon-btn" class:on={core.player.shuffle} onclick={shuffleAll} disabled={tracks.length === 0} title="Shuffle play" aria-label="Shuffle">
+  <button class="icon-btn" class:on={core.player.shuffle} onclick={shuffleAll} disabled={tracks.length === 0} title="Shuffle" aria-label="Shuffle">
     <Icon name="shuffle" size={30} />
   </button>
   <button class="icon-btn" onclick={moreMenu} aria-label="More options"><Icon name="more" size={30} /></button>
@@ -442,7 +442,7 @@
               oncontextmenu={(e) => core.openMenu(e, trackMenu(t))}
             >
               <div class="add-thumb">
-                <Cover id={t.hasCover ? t.id : 0} class="thumb" />
+                <Cover id={t.hasCover ? t.id : ''} class="thumb" />
                 <button
                   class="mini-play-fab"
                   class:playing={isPlaying}
@@ -564,7 +564,7 @@
               oncontextmenu={(e) => core.openMenu(e, trackMenu(t))}
             >
               <div class="add-thumb">
-                <Cover id={t.hasCover ? t.id : 0} class="thumb" />
+                <Cover id={t.hasCover ? t.id : ''} class="thumb" />
                 <button
                   class="mini-play-fab"
                   class:playing={isPlaying}

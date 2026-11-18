@@ -46,7 +46,7 @@ export function trackMenu(t: Track, opts: { onRemove?: () => void; playlistId?: 
   return items
 }
 
-export function tracksMenu(ids: number[]): MenuItem[] {
+export function tracksMenu(ids: string[]): MenuItem[] {
   return [
     { label: 'Play next', icon: 'queue', action: () => Go.PlayNext(ids) },
     { label: 'Add to queue', icon: 'plus', action: () => Go.AddToQueue(ids) },

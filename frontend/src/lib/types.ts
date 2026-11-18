@@ -1,6 +1,6 @@
 export interface Track {
-  id: number
-  path: string
+  id: string
+  ytId: string
   title: string
   artist: string
   album: string
@@ -22,11 +22,11 @@ export interface Playlist {
   lastPlayed: number
   trackCount: number
   duration: number
-  coverTracks: number[] | null
+  coverTracks: string[] | null
 }
 
 export interface PlayerState {
-  trackId: number
+  trackId: string
   playlistId: number
   playing: boolean
   loaded: boolean
@@ -46,7 +46,7 @@ export interface PlayerState {
 
 export interface QueueEntry {
   qid: number
-  tid: number
+  tid: string
 }
 
 export interface Settings {
@@ -99,6 +99,31 @@ export interface YtdlpStatus {
   version: string
   path: string
   message: string
+}
+
+export type YtCollectionType = 'LIKED_MUSIC' | 'PLAYLIST' | 'ALBUM'
+
+export interface YtMusicCollection {
+  id: string
+  browseId: string
+  playlistUrl: string
+  title: string
+  subtitle: string
+  trackCountHint: number
+  thumbnailUrl: string
+  type: YtCollectionType | string
+}
+
+export interface YtMusicStatus {
+  loggedIn: boolean
+  syncing: boolean
+  message: string
+}
+
+export interface YtMusicLibraryResponse {
+  collections: YtMusicCollection[]
+  syncedIds: string[]
+  error: string
 }
 
 export interface Lyrics {

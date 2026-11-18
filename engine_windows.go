@@ -20,10 +20,10 @@ func (p *Player) initEngine(set Settings) error {
 
 func (p *Player) closeEngine() {}
 
-func (p *Player) engLoadFile(id int64, _ string) error {
+func (p *Player) engLoadFile(id string, _ string) error {
 	p.emit("webplayer:cmd", map[string]any{
 		"cmd": "load",
-		"url": fmt.Sprintf("/audio/%d?t=%d", id, time.Now().UnixNano()),
+		"url": fmt.Sprintf("/audio/%s?t=%d", id, time.Now().UnixNano()),
 	})
 	return nil
 }

@@ -10,16 +10,16 @@ import (
 
 type qItem struct {
 	QID int64
-	TID int64
+	TID string
 }
 
 type QueueEntry struct {
 	QID int64 `json:"qid"`
-	TID int64 `json:"tid"`
+	TID string `json:"tid"`
 }
 
 type PlayerState struct {
-	TrackID    int64   `json:"trackId"`
+	TrackID    string   `json:"trackId"`
 	PlaylistID int64   `json:"playlistId"`
 	Playing    bool    `json:"playing"`
 	Loaded     bool    `json:"loaded"`
@@ -40,7 +40,7 @@ type PlayerState struct {
 type Player struct {
 	mu     sync.Mutex
 	eng    *audioEngine
-	lookup func(int64) (Track, bool)
+	lookup func(string) (Track, bool)
 	store  *Store
 	emit   func(event string, data ...any)
 	notify func(PlayerState, Track, bool) // state, track, trackKnown
@@ -62,7 +62,7 @@ type Player struct {
 	pos, dur   float64
 	counted    bool
 	playlist   int64
-	previewTID int64
+	previewTID string
 	errStreak  int
 
 	sleepAt  time.Time
@@ -71,7 +71,7 @@ type Player struct {
 	quit chan struct{}
 }
 
-func NewPlayer(store *Store, lookup func(int64) (Track, bool), emit func(string, ...any)) *Player {
+func NewPlayer(store *Store, lookup func(string) (Track, bool), emit func(string, ...any)) *Player {
 	return &Player{store: store, lookup: lookup, emit: emit, idx: -1, repeat: "off", volume: 80, prevVol: 80, quit: make(chan struct{})}
 }
 
@@ -201,7 +201,7 @@ func (p *Player) tickLoop() {
 			if p.fade > 0 {
 				changedVol = true
 			}
-			if !p.counted && (p.previewTID != 0 || (p.idx >= 0 && p.idx < len(p.items))) {
+			if !p.counted && (p.previewTID != "" || (p.idx >= 0 && p.idx < len(p.items))) {
 				threshold := 30.0
 				if p.dur > 0 && p.dur/2 < threshold {
 					threshold = p.dur / 2
@@ -210,7 +210,7 @@ func (p *Player) tickLoop() {
 					p.counted = true
 					tid := p.previewTID
 					pl := int64(0)
-					if tid == 0 {
+					if tid == "" {
 						tid = p.items[p.idx].TID
 						pl = p.playlist
 					}
@@ -285,7 +285,7 @@ func (p *Player) snapshotLocked() (PlayerState, Track, bool) {
 	}
 	var tr Track
 	ok := false
-	if p.previewTID != 0 {
+	if p.previewTID != "" {
 		st.TrackID = p.previewTID
 		tr, ok = p.lookup(st.TrackID)
 		if ok && st.Duration <= 0 {
@@ -356,7 +356,7 @@ func (p *Player) playIndexLocked(i int) {
 		}
 		return
 	}
-	p.previewTID = 0
+	p.previewTID = ""
 	p.idx = i
 	p.pos = 0
 	p.dur = t.Duration
@@ -371,7 +371,7 @@ func (p *Player) playIndexLocked(i int) {
 
 func (p *Player) stopLocked() {
 	p.engStop()
-	p.previewTID = 0
+	p.previewTID = ""
 	p.playing = false
 	p.loaded = false
 	p.pos = 0
@@ -386,14 +386,14 @@ func (p *Player) pauseLocked(pause bool) {
 }
 
 func (p *Player) nextLocked(auto bool) {
-	if p.previewTID != 0 {
+	if p.previewTID != "" {
 		if auto && p.repeat == "one" {
 			tid := p.previewTID
-			p.previewTID = 0
+			p.previewTID = ""
 			p.playPreviewLocked(tid)
 			return
 		}
-		p.previewTID = 0
+		p.previewTID = ""
 		if p.idx >= 0 && p.idx < len(p.items) {
 			p.playIndexLocked(p.idx)
 			return
@@ -432,7 +432,7 @@ func shuffleItems(a []qItem) {
 	rand.Shuffle(len(a), func(i, j int) { a[i], a[j] = a[j], a[i] })
 }
 
-func (p *Player) newItem(tid int64) qItem {
+func (p *Player) newItem(tid string) qItem {
 	p.nextQID++
 	return qItem{QID: p.nextQID, TID: tid}
 }
@@ -454,7 +454,7 @@ func (p *Player) removeAtLocked(i int) {
 // ---------- public control API ----------
 
 // PlayTracks replaces the queue. start < 0 means "no particular track" (start of list or random when shuffled).
-func (p *Player) PlayTracks(ids []int64, start int, shuffle bool, playlistID int64) {
+func (p *Player) PlayTracks(ids []string, start int, shuffle bool, playlistID int64) {
 	if len(ids) == 0 {
 		return
 	}
@@ -510,7 +510,7 @@ func (p *Player) PlayQueueIndex(i int) {
 func (p *Player) Toggle() {
 	p.mu.Lock()
 	if !p.loaded {
-		if p.previewTID != 0 {
+		if p.previewTID != "" {
 			p.playPreviewLocked(p.previewTID)
 		} else if p.idx >= 0 && p.idx < len(p.items) {
 			p.playIndexLocked(p.idx)
@@ -524,7 +524,7 @@ func (p *Player) Toggle() {
 func (p *Player) Play() {
 	p.mu.Lock()
 	if !p.loaded {
-		if p.previewTID != 0 {
+		if p.previewTID != "" {
 			p.playPreviewLocked(p.previewTID)
 		} else if p.idx >= 0 && p.idx < len(p.items) {
 			p.playIndexLocked(p.idx)
@@ -555,7 +555,7 @@ func (p *Player) Next() {
 
 func (p *Player) Prev() {
 	p.mu.Lock()
-	if p.previewTID != 0 {
+	if p.previewTID != "" {
 		if p.pos > 3 || p.idx < 0 || p.idx >= len(p.items) {
 			if p.loaded {
 				p.engSeek(0)
@@ -684,7 +684,7 @@ func (p *Player) SetRepeat(mode string) {
 	p.flush()
 }
 
-func (p *Player) playPreviewLocked(id int64) {
+func (p *Player) playPreviewLocked(id string) {
 	t, ok := p.lookup(id)
 	if !ok {
 		return
@@ -704,18 +704,18 @@ func (p *Player) playPreviewLocked(id int64) {
 // PlayInstant plays a single track right now as a one-time preview without touching the queue:
 // if it's already the playing/previewed track, it toggles play/pause; if you try another track,
 // the previous preview is replaced without ever entering the queue.
-func (p *Player) PlayInstant(id int64) {
+func (p *Player) PlayInstant(id string) {
 	if _, ok := p.lookup(id); !ok {
 		return
 	}
 	p.mu.Lock()
 	curTID := p.previewTID
-	if curTID == 0 && p.idx >= 0 && p.idx < len(p.items) {
+	if curTID == "" && p.idx >= 0 && p.idx < len(p.items) {
 		curTID = p.items[p.idx].TID
 	}
 	if curTID == id {
 		if !p.loaded {
-			if p.previewTID != 0 {
+			if p.previewTID != "" {
 				p.playPreviewLocked(id)
 			} else {
 				p.playIndexLocked(p.idx)
@@ -730,7 +730,7 @@ func (p *Player) PlayInstant(id int64) {
 	p.flush()
 }
 
-func (p *Player) PlayNext(ids []int64) {
+func (p *Player) PlayNext(ids []string) {
 	p.mu.Lock()
 	var newItems []qItem
 	for _, id := range ids {
@@ -784,7 +784,7 @@ func insertItems(a []qItem, at int, ins []qItem) []qItem {
 	return out
 }
 
-func (p *Player) AddToQueue(ids []int64) {
+func (p *Player) AddToQueue(ids []string) {
 	p.mu.Lock()
 	n := 0
 	for _, id := range ids {

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"strconv"
+	"regexp"
 	"sync"
 
 	"github.com/godbus/dbus/v5"
@@ -20,7 +20,7 @@ type Mpris struct {
 
 	mu         sync.Mutex
 	lastStatus string
-	lastTrack  int64
+	lastTrack  string
 	lastLoop   string
 	lastShuf   bool
 	lastVol    float64
@@ -181,7 +181,7 @@ func (m *Mpris) Update(st PlayerState, t Track, ok bool) {
 	if ok && st.TrackID != m.lastTrack {
 		m.lastTrack = st.TrackID
 		md := map[string]dbus.Variant{
-			"mpris:trackid": dbus.MakeVariant(dbus.ObjectPath("/org/vibemusic/track/" + strconv.FormatInt(t.ID, 10))),
+			"mpris:trackid": dbus.MakeVariant(dbus.ObjectPath("/org/vibemusic/track/" + mprisIDRe.ReplaceAllString(t.ID, "_"))),
 			"mpris:length":  dbus.MakeVariant(int64(st.Duration * 1e6)),
 			"xesam:title":   dbus.MakeVariant(t.Title),
 			"xesam:artist":  dbus.MakeVariant([]string{t.Artist}),
@@ -223,3 +223,5 @@ func (m *Mpris) Update(st PlayerState, t Track, ok bool) {
 }
 
 var _ = fmt.Sprint
+
+var mprisIDRe = regexp.MustCompile(`[^A-Za-z0-9_]`)

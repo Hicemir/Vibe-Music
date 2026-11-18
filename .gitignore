@@ -24,3 +24,10 @@ frontend/.vscode/
 .DS_Store
 .env
 .env.*
+
+# Internal architecture & planning docs
+ARCHITECTURE.md
+PLAN.md
+androidNative/ARCHITECTURE.md
+androidNative/PLAN.md
+*.keystore

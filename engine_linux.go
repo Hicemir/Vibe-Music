@@ -48,7 +48,7 @@ func (p *Player) closeEngine() {
 	}
 }
 
-func (p *Player) engLoadFile(_ int64, path string) error {
+func (p *Player) engLoadFile(_ string, path string) error {
 	if p.eng == nil || p.eng.m == nil {
 		return fmt.Errorf("audio engine not ready")
 	}

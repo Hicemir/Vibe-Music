@@ -105,7 +105,7 @@ export namespace main {
 		}
 	}
 	export class PlayerState {
-	    trackId: number;
+	    trackId: string;
 	    playlistId: number;
 	    playing: boolean;
 	    loaded: boolean;
@@ -153,7 +153,7 @@ export namespace main {
 	    lastPlayed: number;
 	    trackCount: number;
 	    duration: number;
-	    coverTracks: number[];
+	    coverTracks: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Playlist(source);
@@ -221,8 +221,8 @@ export namespace main {
 	    }
 	}
 	export class Track {
-	    id: number;
-	    path: string;
+	    id: string;
+	    ytId: string;
 	    title: string;
 	    artist: string;
 	    album: string;
@@ -243,7 +243,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
-	        this.path = source["path"];
+	        this.ytId = source["ytId"];
 	        this.title = source["title"];
 	        this.artist = source["artist"];
 	        this.album = source["album"];
@@ -256,6 +256,82 @@ export namespace main {
 	        this.format = source["format"];
 	        this.bitrate = source["bitrate"];
 	        this.lastPlayed = source["lastPlayed"];
+	    }
+	}
+	export class YtMusicCollection {
+	    id: string;
+	    browseId: string;
+	    playlistUrl: string;
+	    title: string;
+	    subtitle: string;
+	    trackCountHint: number;
+	    thumbnailUrl: string;
+	    type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new YtMusicCollection(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.browseId = source["browseId"];
+	        this.playlistUrl = source["playlistUrl"];
+	        this.title = source["title"];
+	        this.subtitle = source["subtitle"];
+	        this.trackCountHint = source["trackCountHint"];
+	        this.thumbnailUrl = source["thumbnailUrl"];
+	        this.type = source["type"];
+	    }
+	}
+	export class YtMusicLibraryResponse {
+	    collections: YtMusicCollection[];
+	    syncedIds: string[];
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new YtMusicLibraryResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.collections = this.convertValues(source["collections"], YtMusicCollection);
+	        this.syncedIds = source["syncedIds"];
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class YtMusicStatus {
+	    loggedIn: boolean;
+	    syncing: boolean;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new YtMusicStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.loggedIn = source["loggedIn"];
+	        this.syncing = source["syncing"];
+	        this.message = source["message"];
 	    }
 	}
 	export class YtdlpStatus {

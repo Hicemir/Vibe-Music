@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -32,7 +31,11 @@ type App struct {
 	set   Settings
 
 	trMu   sync.RWMutex
-	tracks map[int64]Track
+	tracks map[string]Track
+
+	ytmMu      sync.Mutex
+	ytmSyncing bool
+	ytmMessage string
 
 	quitting bool
 	mini     bool
@@ -43,7 +46,7 @@ type App struct {
 var globalApp *App
 
 func NewApp() *App {
-	a := &App{tracks: map[int64]Track{}}
+	a := &App{tracks: map[string]Track{}}
 	globalApp = a
 	return a
 }
@@ -55,7 +58,7 @@ func (a *App) emit(event string, data ...any) {
 	wr.EventsEmit(a.ctx, event, data...)
 }
 
-func (a *App) lookup(id int64) (Track, bool) {
+func (a *App) lookup(id string) (Track, bool) {
 	a.trMu.RLock()
 	defer a.trMu.RUnlock()
 	t, ok := a.tracks[id]
@@ -67,7 +70,7 @@ func (a *App) reloadTracks() []Track {
 	if err != nil {
 		return nil
 	}
-	m := make(map[int64]Track, len(list))
+	m := make(map[string]Track, len(list))
 	for _, t := range list {
 		m[t.ID] = t
 	}
@@ -207,7 +210,7 @@ func (a *App) CloseWindow() {
 }
 
 func (a *App) GetVersion() string {
-	return "0.4.4"
+	return "0.5.0"
 }
 
 func (a *App) OpenInBrowser(url string) {
@@ -249,7 +252,7 @@ func (a *App) Rescan() {
 	}()
 }
 
-func (a *App) ToggleLike(id int64) bool {
+func (a *App) ToggleLike(id string) bool {
 	t, ok := a.lookup(id)
 	if !ok {
 		return false
@@ -266,7 +269,7 @@ func (a *App) ToggleLike(id int64) bool {
 	return nv
 }
 
-func (a *App) ShowInFolder(id int64) {
+func (a *App) ShowInFolder(id string) {
 	if t, ok := a.lookup(id); ok {
 		if runtime.GOOS == "windows" {
 			_ = exec.Command("explorer.exe", "/select,", t.Path).Start()
@@ -277,7 +280,7 @@ func (a *App) ShowInFolder(id int64) {
 }
 
 // TrashTrack moves the file to the trash and removes it from the library.
-func (a *App) TrashTrack(id int64) string {
+func (a *App) TrashTrack(id string) string {
 	t, ok := a.lookup(id)
 	if !ok {
 		return "track not found"
@@ -291,7 +294,7 @@ func (a *App) TrashTrack(id int64) string {
 			return "could not move to trash (is gio installed?): " + err.Error()
 		}
 	}
-	_ = a.store.DeleteTracks([]int64{id})
+	_ = a.store.DeleteTracks([]string{id})
 	_ = os.Remove(coverPath(id))
 	a.reloadTracks()
 	a.emit("library:changed")
@@ -299,7 +302,7 @@ func (a *App) TrashTrack(id int64) string {
 	return ""
 }
 
-func (a *App) GetLyrics(id int64) Lyrics {
+func (a *App) GetLyrics(id string) Lyrics {
 	t, ok := a.lookup(id)
 	if !ok {
 		return Lyrics{}
@@ -317,19 +320,19 @@ func (a *App) GetPlaylists() []Playlist {
 	return p
 }
 
-func (a *App) GetPlaylistTrackIDs(id int64) []int64 {
+func (a *App) GetPlaylistTrackIDs(id int64) []string {
 	ids, err := a.store.PlaylistTrackIDs(id)
 	if err != nil {
-		return []int64{}
+		return []string{}
 	}
 	return ids
 }
 
-func (a *App) GetAllPlaylistTracks() map[int64][]int64 {
+func (a *App) GetAllPlaylistTracks() map[int64][]string {
 	return a.store.AllPlaylistTracks()
 }
 
-func (a *App) CreatePlaylist(name string, trackIDs []int64) int64 {
+func (a *App) CreatePlaylist(name string, trackIDs []string) int64 {
 	id, err := a.store.CreatePlaylist(name)
 	if err != nil {
 		return 0
@@ -351,19 +354,19 @@ func (a *App) DeletePlaylist(id int64) {
 	a.emit("playlists:changed")
 }
 
-func (a *App) SetPlaylistTracks(id int64, ids []int64) {
+func (a *App) SetPlaylistTracks(id int64, ids []string) {
 	_ = a.store.SetPlaylistTracks(id, ids)
 	a.emit("playlists:changed")
 }
 
-func (a *App) AddToPlaylist(id int64, ids []int64) int {
+func (a *App) AddToPlaylist(id int64, ids []string) int {
 	n, _ := a.store.AddToPlaylist(id, ids)
 	a.emit("playlists:changed")
 	return n
 }
 
 func (a *App) addFilesToPlaylist(name string, files []string) {
-	var ids []int64
+	var ids []string
 	for _, f := range files {
 		if t, ok := a.store.TrackByPath(f); ok {
 			ids = append(ids, t.ID)
@@ -404,6 +407,65 @@ func (a *App) likeFiles(files []string) {
 	}
 }
 
+// m3uEntry is one parsed playlist line with its optional #EXTVIBE hints.
+type m3uEntry struct {
+	id, ytID, path string
+}
+
+// parseVibeTag parses "ID=<id>;YTID=<yt>" from an #EXTVIBE line.
+func parseVibeTag(line string) (id, ytID string) {
+	for _, kv := range strings.Split(strings.TrimPrefix(line, "#EXTVIBE:"), ";") {
+		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(k) {
+		case "ID":
+			id = v
+		case "YTID":
+			ytID = v
+		}
+	}
+	return
+}
+
+// resolveM3U maps an entry to a library track: by ID / YTID first, then by normalised rel_path.
+func (a *App) resolveM3U(e m3uEntry, fileDir string) (Track, bool) {
+	if e.id != "" {
+		if t, ok := a.store.TrackByID(e.id); ok {
+			return t, true
+		}
+	}
+	if e.ytID != "" && ytIDRe.MatchString(e.ytID) {
+		if t, ok := a.store.TrackByID("yt:" + e.ytID); ok {
+			return t, true
+		}
+	}
+	p := strings.TrimPrefix(e.path, "file://")
+	if p == "" {
+		return Track{}, false
+	}
+	// absolute entries from other tools: try as a local file inside a registered root
+	if filepath.IsAbs(p) || driveLetter.MatchString(p) {
+		if t, ok := a.store.TrackByPath(filepath.Clean(p)); ok {
+			return t, true
+		}
+		return Track{}, false
+	}
+	rel, ok := cleanRelPath(p)
+	if !ok {
+		return Track{}, false
+	}
+	if t, ok := a.store.TrackByRelAnyRoot(rel); ok {
+		return t, true
+	}
+	// relative to the playlist file's own folder
+	if t, ok := a.store.TrackByPath(filepath.Join(fileDir, filepath.FromSlash(rel))); ok {
+		return t, true
+	}
+	return Track{}, false
+}
+
 // ImportM3U opens a file picker and creates a playlist from an .m3u/.m3u8 file.
 func (a *App) ImportM3U() string {
 	file, err := wr.OpenFileDialog(a.ctx, wr.OpenDialogOptions{
@@ -419,25 +481,31 @@ func (a *App) ImportM3U() string {
 	}
 	defer f.Close()
 	dir := filepath.Dir(file)
-	var files []string
+	var entries []m3uEntry
+	var pending m3uEntry
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		l := strings.TrimSpace(sc.Text())
-		if l == "" || strings.HasPrefix(l, "#") {
+		l := strings.TrimSpace(strings.TrimPrefix(sc.Text(), "\ufeff"))
+		if l == "" {
 			continue
 		}
-		l = strings.TrimPrefix(l, "file://")
-		if !filepath.IsAbs(l) {
-			l = filepath.Join(dir, l)
+		if strings.HasPrefix(l, "#EXTVIBE:") {
+			pending.id, pending.ytID = parseVibeTag(l)
+			continue
 		}
-		files = append(files, filepath.Clean(l))
+		if strings.HasPrefix(l, "#") {
+			continue
+		}
+		pending.path = strings.ReplaceAll(l, "\\", "/")
+		entries = append(entries, pending)
+		pending = m3uEntry{}
 	}
 	name := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
 	a.scanner.Scan(a.scanDirs())
 	a.reloadTracks()
-	var ids []int64
-	for _, p := range files {
-		if t, ok := a.store.TrackByPath(p); ok {
+	var ids []string
+	for _, e := range entries {
+		if t, ok := a.resolveM3U(e, dir); ok {
 			ids = append(ids, t.ID)
 		}
 	}
@@ -449,7 +517,7 @@ func (a *App) ImportM3U() string {
 	return ""
 }
 
-// ExportPlaylist saves a playlist as .m3u8.
+// ExportPlaylist saves a playlist as a portable .m3u8 (forward-slash rel_paths, never absolute).
 func (a *App) ExportPlaylist(id int64, name string) string {
 	file, err := wr.SaveFileDialog(a.ctx, wr.SaveDialogOptions{
 		Title: "Export playlist", DefaultFilename: name + ".m3u8",
@@ -462,7 +530,8 @@ func (a *App) ExportPlaylist(id int64, name string) string {
 	b.WriteString("#EXTM3U\n")
 	for _, tid := range a.GetPlaylistTrackIDs(id) {
 		if t, ok := a.lookup(tid); ok {
-			fmt.Fprintf(&b, "#EXTINF:%d,%s - %s\n%s\n", int(t.Duration), t.Artist, t.Title, t.Path)
+			fmt.Fprintf(&b, "#EXTVIBE:ID=%s;YTID=%s\n", t.ID, t.YtID)
+			fmt.Fprintf(&b, "#EXTINF:%d,%s - %s\n%s\n", int(t.Duration), t.Artist, t.Title, t.RelPath)
 		}
 	}
 	if err := os.WriteFile(file, []byte(b.String()), 0o644); err != nil {
@@ -473,11 +542,11 @@ func (a *App) ExportPlaylist(id int64, name string) string {
 
 // ---------- player ----------
 
-func (a *App) PlayTracks(ids []int64, start int, shuffle bool, playlistID int64) {
+func (a *App) PlayTracks(ids []string, start int, shuffle bool, playlistID int64) {
 	a.player.PlayTracks(ids, start, shuffle, playlistID)
 	a.persistPlayerPrefs()
 }
-func (a *App) PlayInstant(id int64)        { a.player.PlayInstant(id) }
+func (a *App) PlayInstant(id string)        { a.player.PlayInstant(id) }
 func (a *App) PlayQueueIndex(i int)        { a.player.PlayQueueIndex(i) }
 func (a *App) Pause()                      { a.player.Pause() }
 func (a *App) Resume()                     { a.player.Play() }
@@ -485,8 +554,8 @@ func (a *App) Next()                       { a.player.Next() }
 func (a *App) Previous()                   { a.player.Prev() }
 func (a *App) Seek(sec float64)            { a.player.Seek(sec) }
 func (a *App) SeekRelative(delta float64)  { a.player.SeekRelative(delta) }
-func (a *App) PlayNext(ids []int64)        { a.player.PlayNext(ids) }
-func (a *App) AddToQueue(ids []int64)      { a.player.AddToQueue(ids) }
+func (a *App) PlayNext(ids []string)        { a.player.PlayNext(ids) }
+func (a *App) AddToQueue(ids []string)      { a.player.AddToQueue(ids) }
 func (a *App) RemoveFromQueue(qid int64)   { a.player.RemoveFromQueue(qid) }
 func (a *App) MoveInQueue(from, to int)    { a.player.MoveInQueue(from, to) }
 func (a *App) ClearQueue()                 { a.player.ClearQueue() }
@@ -502,9 +571,9 @@ func (a *App) OnAudioError(msg string)     { a.player.OnAudioError(msg) }
 // TogglePlayPause is also used by media keys / tray; with an empty queue it starts the whole library.
 func (a *App) TogglePlayPause() {
 	st := a.player.State()
-	if st.QueueLen == 0 && st.TrackID == 0 {
+	if st.QueueLen == 0 && st.TrackID == "" {
 		list := a.reloadTracks()
-		ids := make([]int64, 0, len(list))
+		ids := make([]string, 0, len(list))
 		for _, t := range list {
 			ids = append(ids, t.ID)
 		}
@@ -634,14 +703,29 @@ func (a *App) GetArtistOnlineDiscovery(artist string, seed int) []DiscoverItem {
 	return a.dl.DiscoverForArtist(artist, seed)
 }
 
+func (a *App) FetchYtMusicLibrary() YtMusicLibraryResponse {
+	cols, err := a.fetchYtMusicLibraryInternal()
+	if err != nil {
+		return YtMusicLibraryResponse{
+			Collections: []YtMusicCollection{},
+			SyncedIDs:   a.store.LoadSyncedYtCollections(),
+			Error:       err.Error(),
+		}
+	}
+	return YtMusicLibraryResponse{
+		Collections: cols,
+		SyncedIDs:   a.store.LoadSyncedYtCollections(),
+	}
+}
+
 // ---------- cover art asset handler ----------
 
 type coverHandler struct{}
 
 func (coverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/cover/") {
-		id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/cover/"), 10, 64)
-		if err == nil {
+		id := strings.TrimPrefix(r.URL.Path, "/cover/")
+		if id != "" {
 			p := coverPath(id)
 			if _, err := os.Stat(p); err == nil {
 				w.Header().Set("Cache-Control", "public, max-age=86400")
@@ -651,8 +735,8 @@ func (coverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if strings.HasPrefix(r.URL.Path, "/audio/") {
-		id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/audio/"), 10, 64)
-		if err == nil && globalApp != nil {
+		id := strings.TrimPrefix(r.URL.Path, "/audio/")
+		if id != "" && globalApp != nil {
 			if t, ok := globalApp.lookup(id); ok {
 				if _, err := os.Stat(t.Path); err == nil {
 					http.ServeFile(w, r, t.Path)

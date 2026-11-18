@@ -6,6 +6,7 @@ A fast, local-first desktop music player for Linux and Windows built with Go, Wa
 
 - **Linux**: [Download `VibeMusic`](https://github.com/Hicemir/Vibe-Music/releases/latest/download/VibeMusic) *(run `chmod +x VibeMusic` after downloading)*
 - **Windows**: [Download `VibeMusic.exe`](https://github.com/Hicemir/Vibe-Music/releases/latest/download/VibeMusic.exe)
+- **Android**: [Download `VibeMusic.apk`](https://github.com/Hicemir/Vibe-Music/releases/latest/download/VibeMusic.apk)
 
 ## Features
 

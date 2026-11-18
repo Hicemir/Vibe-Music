@@ -17,7 +17,7 @@ export function fmtDuration(sec: number): string {
   return `${h} hr ${m % 60} min`
 }
 
-export function coverUrl(id: number): string {
+export function coverUrl(id: string): string {
   return `/cover/${id}`
 }
 
@@ -25,7 +25,7 @@ export function norm(s: string): string {
   return s.toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').trim()
 }
 
-const ARTIST_SPLIT_RE = /\s*(?:,|;|\/|\s&\s|\sfeat\.?\s|\sft\.?\s|\sfeaturing\s)\s*/i
+const ARTIST_SPLIT_RE = /\s*(?:,|、|;|\/|&|\s+x\s+|×|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*/i
 const TOPIC_SUFFIX_RE = /\s*-\s*topic\s*$/i
 
 export function splitArtists(raw: string): string[] {
@@ -60,8 +60,8 @@ export interface Group {
   name: string
   sub: string
   tracks: Track[]
-  coverId: number
-  coverIds: number[]
+  coverId: string
+  coverIds: string[]
 }
 
 export function groupBy(tracks: Track[], field: 'album' | 'artist'): Group[] {
@@ -73,7 +73,7 @@ export function groupBy(tracks: Track[], field: 'album' | 'artist'): Group[] {
         const key = norm(a)
         let g = m.get(key)
         if (!g) {
-          g = { key, name: a, sub: '', tracks: [], coverId: 0, coverIds: [] }
+          g = { key, name: a, sub: '', tracks: [], coverId: '', coverIds: [] }
           m.set(key, g)
         }
         g.tracks.push(t)
@@ -91,7 +91,7 @@ export function groupBy(tracks: Track[], field: 'album' | 'artist'): Group[] {
       let g = m.get(key)
       if (!g) {
         const primary = splitArtists(t.artist)[0] ?? t.artist
-        g = { key, name, sub: primary, tracks: [], coverId: 0, coverIds: [] }
+        g = { key, name, sub: primary, tracks: [], coverId: '', coverIds: [] }
         m.set(key, g)
       }
       g.tracks.push(t)
@@ -134,7 +134,7 @@ export function recommendForPlaylist(
   allTracks: Track[],
   seed = 0,
   limit = 8,
-  playlistTrackMap: Record<number, number[]> = {},
+  playlistTrackMap: Record<number, string[]> = {},
 ): Track[] {
   const inPlaylist = new Set(playlistTracks.map((t) => t.id))
   const candidates = allTracks.filter((t) => !inPlaylist.has(t.id))
@@ -143,7 +143,7 @@ export function recommendForPlaylist(
   const artistFreq = new Map<string, number>()
   const albumFreq = new Map<string, number>()
   const tokenFreq = new Map<string, number>()
-  const cooccurFreq = new Map<number, number>()
+  const cooccurFreq = new Map<string, number>()
 
   for (const t of playlistTracks) {
     for (const a of splitArtists(t.artist)) {
@@ -197,7 +197,7 @@ export function recommendForPlaylist(
     if (c.liked) score += 12
     score += Math.min(c.playCount * 3, 18)
 
-    const hash = (((c.id * 2654435761) ^ ((seed + 1) * 1013904223)) >>> 0) / 4294967295
+    const hash = (((hashId(c.id) * 2654435761) ^ ((seed + 1) * 1013904223)) >>> 0) / 4294967295
     const jitter = seed === 0 ? (playlistTracks.length > 0 ? 28 : 50) : 260
     score += hash * jitter
     return { track: c, score }
@@ -210,7 +210,7 @@ export function recommendForPlaylist(
 export function buildRadioMix(
   seedTrack: Track,
   allTracks: Track[],
-  playlistTrackMap: Record<number, number[]> = {},
+  playlistTrackMap: Record<number, string[]> = {},
   mode: 'all' | 'familiar' | 'rediscover' | 'artist' = 'all',
   limit = 25,
 ): Track[] {
@@ -218,7 +218,7 @@ export function buildRadioMix(
   const seedAlbum = seedTrack.album ? norm(seedTrack.album) : ''
   const seedTokens = new Set(titleTokens(seedTrack.title))
 
-  const cooccur = new Map<number, number>()
+  const cooccur = new Map<string, number>()
   for (const tids of Object.values(playlistTrackMap)) {
     if (Array.isArray(tids) && tids.includes(seedTrack.id)) {
       for (const id of tids) {
@@ -260,7 +260,7 @@ export function buildRadioMix(
       if (c.liked) score += 18
       score += Math.min(c.playCount * 4, 24)
     }
-    const h = (((c.id * 2654435761) ^ (seedTrack.id * 1013904223)) >>> 0) / 4294967295
+    const h = (((hashId(c.id) * 2654435761) ^ (hashId(seedTrack.id) * 1013904223)) >>> 0) / 4294967295
     score += h * 32
     return { track: c, score }
   })
@@ -280,7 +280,7 @@ export function buildQuickPicks(allTracks: Track[], seed = 0): Track[] {
       const ageDays = Math.max(0, (now - t.lastPlayed) / 86400)
       s += Math.max(0, 60 - ageDays * 3)
     }
-    const h = (((t.id * 2654435761) ^ ((seed + 1) * 1013904223)) >>> 0) / 4294967295
+    const h = (((hashId(t.id) * 2654435761) ^ ((seed + 1) * 1013904223)) >>> 0) / 4294967295
     s += h * 40
     return { track: t, score: s }
   })
@@ -308,7 +308,7 @@ export function samplePool(pool: Track[], seed = 0, limit = 12): Track[] {
   const s = (seed + 1) * 1013904223
   return pool
     .map((t) => {
-      const h = (((t.id * 2654435761) ^ s) >>> 0)
+      const h = (((hashId(t.id) * 2654435761) ^ s) >>> 0)
       return { t, h }
     })
     .sort((a, b) => a.h - b.h)
@@ -534,3 +534,13 @@ export function smoothScroll(node: HTMLElement) {
   }
 }
 
+
+/** Stable 32-bit FNV-1a hash of a canonical track id (used for deterministic jitter). */
+export function hashId(id: string): number {
+  let h = 2166136261
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}

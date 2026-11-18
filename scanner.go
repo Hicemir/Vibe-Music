@@ -129,17 +129,28 @@ func fallbackTitle(path string) (artist, title string) {
 	return "", strings.TrimSpace(base)
 }
 
-func (s *Scanner) readTrack(path string, info fs.FileInfo, id int64) (Track, bool) {
-	t := Track{Path: path, Size: info.Size(), MTime: info.ModTime().Unix(), AddedAt: info.ModTime().Unix()}
+// readTrack probes a file and derives its canonical key (yt:<id> or local:<hash>) without using its path.
+func (s *Scanner) readTrack(path string, info fs.FileInfo, rootKey, rel string) (Track, bool) {
+	t := Track{Path: path, RootKey: rootKey, RelPath: rel, Size: info.Size(), MTime: info.ModTime().Unix(), AddedAt: info.ModTime().Unix()}
 	t.Format = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	p, err := probe(path)
+	var tags map[string]string
+	if err == nil {
+		tags = p.tags()
+	}
+	if yt := firstNonEmpty(ytIDFromTags(tags), ytIDFromName(rel)); yt != "" {
+		t.YtID, t.ID = yt, "yt:"+yt
+	} else if h, herr := localContentID(path, info.Size()); herr == nil {
+		t.ID = h
+	} else {
+		return t, false
+	}
 	if err != nil {
 		fa, ft := fallbackTitle(path)
 		t.Title = ft
 		t.Artist = cleanArtistString(fa)
 		return t, true
 	}
-	tags := p.tags()
 	t.Title = strings.TrimSpace(tags["title"])
 	t.Artist = strings.TrimSpace(tags["artist"])
 	if t.Artist == "" {
@@ -179,12 +190,12 @@ func firstNonEmpty(v ...string) string {
 	return ""
 }
 
-func coverPath(id int64) string {
-	return filepath.Join(coverDir(), strconv.FormatInt(id, 10)+".jpg")
+func coverPath(id string) string {
+	return filepath.Join(coverDir(), coverKey(id)+".jpg")
 }
 
 // extractCover tries embedded art, then a sidecar image next to the file.
-func extractCover(path string, id int64) bool {
+func extractCover(path string, id string) bool {
 	out := coverPath(id)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -234,9 +245,11 @@ func (s *Scanner) Scan(dirs []string) {
 	}
 
 	type job struct {
-		path string
-		info fs.FileInfo
-		old  *Track
+		path    string
+		info    fs.FileInfo
+		old     *Track
+		rootKey string
+		rel     string
 	}
 	var jobs []job
 	seen := map[string]bool{}
@@ -246,6 +259,7 @@ func (s *Scanner) Scan(dirs []string) {
 			continue
 		}
 		liveRoots[d] = true
+		rootKey := s.store.EnsureRoot(d)
 		_ = filepath.WalkDir(d, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
 				return nil
@@ -257,12 +271,20 @@ func (s *Scanner) Scan(dirs []string) {
 			if err != nil {
 				return nil
 			}
+			r, rerr := filepath.Rel(d, p)
+			if rerr != nil {
+				return nil
+			}
+			rel, okRel := cleanRelPath(filepath.ToSlash(r))
+			if !okRel {
+				return nil
+			}
 			seen[p] = true
 			if old, ok := existing[p]; ok && old.MTime == info.ModTime().Unix() && old.Size == info.Size() &&
 				(!old.HasCover || fileExists(coverPath(old.ID))) {
 				return nil
 			}
-			j := job{path: p, info: info}
+			j := job{path: p, info: info, rootKey: rootKey, rel: rel}
 			if old, ok := existing[p]; ok {
 				o := old
 				j.old = &o
@@ -273,9 +295,9 @@ func (s *Scanner) Scan(dirs []string) {
 	}
 
 	// remove vanished files (only those under reachable roots)
-	var gone []int64
+	var gone []string
 	for p, t := range existing {
-		if seen[p] {
+		if seen[p] || p == "" {
 			continue
 		}
 		for root := range liveRoots {
@@ -299,7 +321,7 @@ func (s *Scanner) Scan(dirs []string) {
 		go func() {
 			defer wg.Done()
 			for j := range ch {
-				t, ok := s.readTrack(j.path, j.info, 0)
+				t, ok := s.readTrack(j.path, j.info, j.rootKey, j.rel)
 				if ok {
 					if j.old != nil {
 						t.AddedAt = j.old.AddedAt

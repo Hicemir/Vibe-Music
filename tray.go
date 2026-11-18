@@ -35,7 +35,7 @@ type Tray struct {
 	ready bool
 
 	mTitle, mPlay, mNext, mPrev, mShow, mQuit *systray.MenuItem
-	lastTrack                                  int64
+	lastTrack                                  string
 	lastPlaying                                bool
 	lastLoaded                                 bool
 }

@@ -5,7 +5,7 @@
   let {
     title,
     sub = '',
-    id = 0,
+    id = '',
     ids = null,
     icon = 'note',
     round = false,
@@ -17,8 +17,8 @@
   }: {
     title: string
     sub?: string
-    id?: number
-    ids?: number[] | null
+    id?: string
+    ids?: string[] | null
     icon?: string
     round?: boolean
     playing?: boolean

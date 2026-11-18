@@ -2,41 +2,44 @@ import * as Go from '../../wailsjs/go/main/App'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 import { buildRadioMix } from './util'
 import type {
-  Track, Playlist, PlayerState, QueueEntry, Settings, DownloadJob, YtdlpStatus, Route, MenuItem, DiscoverItem,
+  Track, Playlist, PlayerState, QueueEntry, Settings, DownloadJob, YtdlpStatus, YtMusicStatus, Route, MenuItem, DiscoverItem,
 } from './types'
 
 export { Go }
 
 const emptyPlayer: PlayerState = {
-  trackId: 0, playlistId: 0, playing: false, loaded: false, position: 0, duration: 0, volume: 80, muted: false,
+  trackId: '', playlistId: 0, playing: false, loaded: false, position: 0, duration: 0, volume: 80, muted: false,
   shuffle: false, repeat: 'off', queueIndex: -1, queueLen: 0, hasNext: false, hasPrev: false,
   sleepAt: 0, sleepEnd: false,
 }
 
 export type Modal =
-  | { type: 'newPlaylist'; trackIds?: number[] }
-  | { type: 'addToPlaylist'; trackIds: number[] }
+  | { type: 'newPlaylist'; trackIds?: string[] }
+  | { type: 'addToPlaylist'; trackIds: string[] }
   | { type: 'rename'; id: number; name: string }
   | { type: 'confirm'; title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void }
   | { type: 'sleep' }
+  | { type: 'ytmImport' }
 
 class Core {
   tracks = $state.raw<Track[]>([])
-  byId = $state.raw<Map<number, Track>>(new Map())
+  byId = $state.raw<Map<string, Track>>(new Map())
   playlists = $state.raw<Playlist[]>([])
-  playlistTrackMap = $state.raw<Record<number, number[]>>({})
+  playlistTrackMap = $state.raw<Record<number, string[]>>({})
   player = $state.raw<PlayerState>(emptyPlayer)
   queue = $state.raw<QueueEntry[]>([])
-  radioSeed = $state.raw<{ trackId: number; mode: 'all' | 'familiar' | 'rediscover' | 'artist' } | null>(null)
+  radioSeed = $state.raw<{ trackId: string; mode: 'all' | 'familiar' | 'rediscover' | 'artist' } | null>(null)
   discoverItems = $state.raw<DiscoverItem[]>([])
   discoverLoading = $state(false)
   discoverSeed = $state(0)
   settings = $state.raw<Settings | null>(null)
   downloads = $state.raw<DownloadJob[]>([])
   ytdlp = $state.raw<YtdlpStatus>({ state: 'idle', version: '', path: '', message: '' })
+  ytm = $state.raw<YtMusicStatus>({ loggedIn: false, syncing: false, message: '' })
+  ytmPendingAction = $state<'import' | 'sync' | null>(null)
   scan = $state.raw({ scanning: false, done: 0, total: 0 })
   loaded = $state(false)
-  version = $state('0.4.4')
+  version = $state('0.5.0')
   windowMaximised = $state(true)
   coverExpanded = $state(false)
 
@@ -64,11 +67,19 @@ class Core {
     const t = (await Go.GetTracks()) as unknown as Track[]
     this.tracks = t
     this.byId = new Map(t.map((x) => [x.id, x]))
+    if (this.discoverItems.length > 0) {
+      const ownedYt = new Set<string>()
+      for (const x of t) {
+        if (x.ytId) ownedYt.add(x.ytId)
+        if (x.id.startsWith('yt:')) ownedYt.add(x.id.slice(3))
+      }
+      this.discoverItems = this.discoverItems.filter((d) => !ownedYt.has(d.videoId))
+    }
   }
   async loadPlaylists() {
     this.playlists = ((await Go.GetPlaylists()) as unknown as Playlist[]) ?? []
     try {
-      const m = (await (Go as any).GetAllPlaylistTracks?.()) as Record<number, number[]> | undefined
+      const m = (await (Go as any).GetAllPlaylistTracks?.()) as Record<number, string[]> | undefined
       if (m) this.playlistTrackMap = m
     } catch {}
   }
@@ -179,7 +190,7 @@ class Core {
   }
 
   // ----- playback shortcuts -----
-  play(ids: number[], start = -1, opts: { shuffle?: boolean; playlistId?: number; keepRadio?: boolean } = {}) {
+  play(ids: string[], start = -1, opts: { shuffle?: boolean; playlistId?: number; keepRadio?: boolean } = {}) {
     if (!ids.length) return
     if (!opts.keepRadio) this.radioSeed = null
     const shuffle = opts.shuffle ?? this.player.shuffle
@@ -191,7 +202,7 @@ class Core {
       else Go.Resume()
       return
     }
-    const ids = ((await Go.GetPlaylistTrackIDs(id)) as number[]) ?? []
+    const ids = ((await Go.GetPlaylistTrackIDs(id)) as string[]) ?? []
     this.play(ids, -1, { playlistId: id, shuffle })
   }
   toggleLikedSongs() {
@@ -224,15 +235,29 @@ class Core {
     Go.ClearQueue()
     if (upcomingIds.length > 0) Go.AddToQueue(upcomingIds)
   }
-  playInstant(id: number) {
+  playInstant(id: string) {
     Go.PlayInstant(id)
   }
   toggle() {
     Go.TogglePlayPause()
   }
 
-  async toggleLike(id: number) {
+  async toggleLike(id: string) {
     await Go.ToggleLike(id)
+  }
+
+  async startYtMusicAction(action: 'import' | 'sync') {
+    if (this.ytm.loggedIn) {
+      if (action === 'import') {
+        this.modal = { type: 'ytmImport' }
+      } else {
+        const err = await Go.SyncYtMusicLibrary()
+        if (err) this.toast(err)
+      }
+      return
+    }
+    this.ytmPendingAction = action
+    await Go.StartYtMusicLogin()
   }
 
   // ----- WebAudio fallback engine (used on Windows) -----
@@ -372,7 +397,22 @@ class Core {
     EventsOn('settings:changed', (s: Settings) => (this.settings = s))
     EventsOn('app:toast', (t: string) => this.toast(t))
     EventsOn('ytdlp:status', (s: YtdlpStatus) => (this.ytdlp = s))
-    EventsOn('track:liked', (id: number, liked: boolean) => {
+    EventsOn('ytm:status', (s: YtMusicStatus) => (this.ytm = s))
+    EventsOn('ytm:login-success', async () => {
+      this.ytm = await Go.GetYtMusicStatus()
+      const act = this.ytmPendingAction
+      this.ytmPendingAction = null
+      if (act === 'import') {
+        this.modal = { type: 'ytmImport' }
+      } else if (act === 'sync') {
+        const err = await Go.SyncYtMusicLibrary()
+        if (err) this.toast(err)
+      }
+    })
+    EventsOn('ytm:login-cancelled', () => {
+      this.ytmPendingAction = null
+    })
+    EventsOn('track:liked', (id: string, liked: boolean) => {
       const t = this.byId.get(id)
       if (!t) return
       const nt = { ...t, liked }
@@ -396,6 +436,7 @@ class Core {
     this.queue = q.items ?? []
     this.downloads = ((await Go.GetDownloads()) as unknown as DownloadJob[]) ?? []
     this.ytdlp = (await Go.GetYtdlpStatus()) as unknown as YtdlpStatus
+    this.ytm = (await Go.GetYtMusicStatus()) as unknown as YtMusicStatus
     try {
       const v = await Go.GetVersion()
       if (v) this.version = v

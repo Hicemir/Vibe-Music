@@ -119,6 +119,28 @@ func nativeOpenBrowser(url string, background bool) {
 	}
 }
 
+func nativeOpenYtMusicLogin(_ string) {
+	if winApp == nil {
+		return
+	}
+	// Try extracting cookies from common Windows browsers first, otherwise open browser sign-in
+	go func() {
+		for _, b := range []string{"edge", "chrome", "brave", "firefox", "vivaldi"} {
+			if winApp.TryExtractBrowserCookies(b) {
+				winApp.emit("ytm:status", winApp.GetYtMusicStatus())
+				winApp.emit("ytm:login-success")
+				winApp.emit("app:toast", "Connected to YouTube Music via "+b)
+				return
+			}
+		}
+		nativeOpenBrowser("https://accounts.google.com/ServiceLogin?ltmpl=music&service=youtube&continue=https%3A%2F%2Fmusic.youtube.com%2F", false)
+		winApp.emit("app:toast", "Sign in to YouTube Music in your browser, then select your browser in Settings or click Import again")
+		winApp.emit("ytm:login-cancelled")
+	}()
+}
+
+func nativeClearYtMusicCookies() {}
+
 func setCmdHidden(cmd *exec.Cmd) {
 	if cmd != nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}

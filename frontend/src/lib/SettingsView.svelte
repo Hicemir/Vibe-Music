@@ -105,18 +105,6 @@
     {/each}
     <div class="set-row">
       <div class="lbl">
-        Quick picks row height
-        <div class="d"><b>1x</b> is a single row. <b>Auto</b> expands to 2x or 3x rows automatically when you hide Top Tracks or Recently Added.</div>
-      </div>
-      <select class="pill-input" value={s.quickPicksRows || '1'} onchange={(e) => save({ quickPicksRows: e.currentTarget.value })}>
-        <option value="1">1x (Single row)</option>
-        <option value="auto">Auto (Expand when shelves hidden)</option>
-        <option value="2">2x (2 rows)</option>
-        <option value="3">3x (3 rows)</option>
-      </select>
-    </div>
-    <div class="set-row">
-      <div class="lbl">
         When clicking “Open in browser” on Discover songs
         <div class="d">Choose whether to switch focus to your browser window immediately or open the tab in the background while staying in Vibe Music.</div>
       </div>

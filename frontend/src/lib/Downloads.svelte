@@ -54,29 +54,64 @@
 
 <div class="view-head"><div class="view-title">Download music</div></div>
 
+<div class="ytm-card">
+  <div class="ytm-card-head">
+    <div class="ytm-card-icon"><Icon name="note" size={22} /></div>
+    <div class="ytm-card-meta">
+      <div class="ytm-card-title">
+        YouTube Music
+        {#if core.ytm.loggedIn}
+          <span class="badge done">Connected</span>
+        {/if}
+      </div>
+      <div class="hint">
+        {#if core.ytm.loggedIn}
+          Connected • Import or sync Liked Songs, Playlists &amp; Albums
+        {:else}
+          Sign in with Google to import your Liked Songs, Playlists &amp; Albums
+        {/if}
+      </div>
+      {#if core.ytm.message}
+        <div class="hint" style:color={core.ytm.syncing ? 'var(--accent)' : 'var(--text-dim)'} style="margin-top:4px">
+          {core.ytm.message}
+        </div>
+      {/if}
+    </div>
+  </div>
+  <div class="ytm-card-actions">
+    <button
+      class="btn primary"
+      disabled={core.ytm.syncing || core.ytmPendingAction !== null}
+      onclick={() => core.startYtMusicAction('import')}
+    >
+      <Icon name="import" size={17} />
+      {core.ytmPendingAction === 'import' ? 'Waiting for sign-in…' : 'Import from YT Music'}
+    </button>
+    <button
+      class="btn ghost"
+      disabled={core.ytm.syncing || core.ytmPendingAction !== null}
+      onclick={() => core.startYtMusicAction('sync')}
+    >
+      <Icon name="refresh" size={17} />
+      {core.ytm.syncing ? 'Syncing…' : core.ytmPendingAction === 'sync' ? 'Waiting for sign-in…' : 'Sync with YT Music'}
+    </button>
+    {#if core.ytm.loggedIn}
+      <button
+        class="btn ghost"
+        disabled={core.ytm.syncing}
+        onclick={() => Go.LogoutYtMusic()}
+      >
+        Sign out
+      </button>
+    {/if}
+  </div>
+</div>
+
 <div class="dl-form">
   <div class="seg" role="tablist">
     <button class:on={mode === 'track'} onclick={() => (mode = 'track')}>Track</button>
     <button class:on={mode === 'playlist'} onclick={() => (mode = 'playlist')}>Playlist</button>
   </div>
-  {#if core.settings?.cookieBrowser}
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <button
-        class="btn ghost"
-        disabled={busy}
-        onclick={async () => {
-          busy = true
-          const err = await Go.StartDownload('https://music.youtube.com/playlist?list=LM', 'playlist')
-          busy = false
-          if (err) core.toast(err)
-          else core.toast('Syncing YouTube Liked Music (will also mark tracks as ♥ Liked)')
-        }}
-      >
-        <Icon name="heart-fill" size={16} /> Import My YT Liked Music ({core.settings.cookieBrowser})
-      </button>
-      <span class="hint">Connected to {core.settings.cookieBrowser} session — private playlists & Liked Music enabled.</span>
-    </div>
-  {/if}
   <div class="dl-row">
     <input
       class="pill-input"

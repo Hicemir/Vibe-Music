@@ -1,16 +1,103 @@
 <script lang="ts">
   import Cover from './Cover.svelte'
+  import Icon from './Icon.svelte'
   import { core, Go } from './store.svelte'
+  import { main } from '../../wailsjs/go/models'
+  import type { YtMusicCollection } from './types'
 
   const m = $derived(core.modal)
   let name = $state('')
   let lastKey = ''
+
+  let ytmLoading = $state(false)
+  let ytmError = $state('')
+  let ytmCollections = $state.raw<YtMusicCollection[]>([])
+  let ytmFilter = $state<'all' | 'playlists' | 'albums'>('all')
+  let ytmSelected = $state<Set<string>>(new Set())
+
+  const ytmFiltered = $derived(
+    ytmCollections.filter((c) => {
+      if (ytmFilter === 'playlists') return c.type === 'PLAYLIST' || c.type === 'LIKED_MUSIC'
+      if (ytmFilter === 'albums') return c.type === 'ALBUM'
+      return true
+    }),
+  )
+
+  const ytmAllVisibleSelected = $derived(
+    ytmFiltered.length > 0 && ytmFiltered.every((c) => ytmSelected.has(c.id)),
+  )
+
+  const ytmSubtitle = $derived.by(() => {
+    if (ytmLoading) return 'Loading your YouTube Music library…'
+    if (ytmError) return ytmError
+    if (ytmCollections.length === 0) return 'Could not load library'
+    const plCount = ytmCollections.filter((c) => c.type === 'PLAYLIST').length
+    const alCount = ytmCollections.filter((c) => c.type === 'ALBUM').length
+    return `Found Liked Music, ${plCount} playlist(s) & ${alCount} saved album(s)`
+  })
+
+  async function loadYtmLibrary() {
+    ytmLoading = true
+    ytmError = ''
+    ytmCollections = []
+    ytmFilter = 'all'
+    ytmSelected = new Set()
+    try {
+      const res = await Go.FetchYtMusicLibrary()
+      if (res.error) {
+        ytmError = res.error
+        ytmCollections = []
+      } else {
+        const cols = (res.collections ?? []) as unknown as YtMusicCollection[]
+        ytmCollections = cols
+        const defaults = new Set<string>(['LM', ...(res.syncedIds ?? [])])
+        const nextSel = new Set<string>()
+        for (const c of cols) {
+          if (defaults.has(c.id)) nextSel.add(c.id)
+        }
+        ytmSelected = nextSel
+      }
+    } catch (e) {
+      ytmError = String(e)
+    } finally {
+      ytmLoading = false
+    }
+  }
+
+  function toggleYtmItem(id: string) {
+    const next = new Set(ytmSelected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    ytmSelected = next
+  }
+
+  function toggleSelectAllVisible() {
+    const next = new Set(ytmSelected)
+    if (ytmAllVisibleSelected) {
+      for (const c of ytmFiltered) next.delete(c.id)
+    } else {
+      for (const c of ytmFiltered) next.add(c.id)
+    }
+    ytmSelected = next
+  }
+
+  async function confirmYtmImport() {
+    const selected = ytmCollections.filter((c) => ytmSelected.has(c.id))
+    if (selected.length === 0) return
+    close()
+    core.toast(`Importing ${selected.length} YouTube Music collection(s)…`)
+    const err = await Go.ImportYtMusicCollections(selected.map((c) => main.YtMusicCollection.createFrom(c)))
+    if (err) core.toast(err)
+  }
 
   $effect(() => {
     const key = m ? m.type + (m.type === 'rename' ? m.id : '') : ''
     if (key !== lastKey) {
       lastKey = key
       name = m?.type === 'rename' ? m.name : ''
+      if (m?.type === 'ytmImport') {
+        loadYtmLibrary()
+      }
     }
   })
 
@@ -64,7 +151,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="overlay" onclick={close}>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="modal" onclick={(e) => e.stopPropagation()}>
+    <div class="modal" class:modal-wide={m.type === 'ytmImport'} onclick={(e) => e.stopPropagation()}>
       {#if m.type === 'newPlaylist'}
         <h3>New playlist</h3>
         <!-- svelte-ignore a11y_autofocus -->
@@ -132,6 +219,80 @@
           {/if}
         </div>
         <div class="row"><button class="btn ghost" onclick={close}>Close</button></div>
+      {:else if m.type === 'ytmImport'}
+        <div>
+          <h3>Import from YouTube Music</h3>
+          <div class="hint" style="margin-top:4px">{ytmSubtitle}</div>
+        </div>
+        <div class="ytm-filter-row">
+          <div class="ytm-filter-pills">
+            <button class="chip" class:on={ytmFilter === 'all'} onclick={() => (ytmFilter = 'all')}>All</button>
+            <button class="chip" class:on={ytmFilter === 'playlists'} onclick={() => (ytmFilter = 'playlists')}>Playlists</button>
+            <button class="chip" class:on={ytmFilter === 'albums'} onclick={() => (ytmFilter = 'albums')}>Albums</button>
+          </div>
+          <button class="link-btn" disabled={ytmLoading || ytmFiltered.length === 0} onclick={toggleSelectAllVisible}>
+            {ytmAllVisibleSelected ? 'Deselect All' : 'Select All'}
+          </button>
+        </div>
+        {#if ytmLoading}
+          <div class="empty" style="padding:36px 16px">Fetching your YouTube Music playlists &amp; albums…</div>
+        {:else if ytmError || ytmCollections.length === 0}
+          <div class="empty" style="padding:32px 16px">
+            <div class="big">No collections found</div>
+            <div class="hint">{ytmError || 'Make sure your Google account is signed in to YouTube Music.'}</div>
+            <div style="margin-top:14px;display:flex;justify-content:center;gap:10px">
+              <button class="btn ghost" onclick={loadYtmLibrary}>Retry</button>
+              <button
+                class="btn ghost"
+                onclick={async () => {
+                  close()
+                  await Go.LogoutYtMusic()
+                  core.startYtMusicAction('import')
+                }}>Switch account</button
+              >
+            </div>
+          </div>
+        {:else}
+          <div class="list ytm-col-list">
+            {#each ytmFiltered as col (col.id)}
+              {@const checked = ytmSelected.has(col.id)}
+              <button class="ytm-col-row" class:selected={checked} onclick={() => toggleYtmItem(col.id)}>
+                <div class="sec-checkbox" class:checked>
+                  {#if checked}<Icon name="check" size={14} />{/if}
+                </div>
+                <div class="ytm-col-thumb">
+                  {#if col.thumbnailUrl}
+                    <img src={col.thumbnailUrl} alt="" loading="lazy" />
+                  {:else}
+                    <Icon
+                      name={col.type === 'LIKED_MUSIC' ? 'heart-fill' : col.type === 'ALBUM' ? 'album' : 'library'}
+                      size={20}
+                    />
+                  {/if}
+                </div>
+                <div class="ytm-col-info">
+                  <div class="ytm-col-title">{col.title}</div>
+                  <div class="hint ytm-col-sub">
+                    {col.subtitle}
+                    {#if col.trackCountHint > 0 && !col.subtitle.toLowerCase().includes('song') && !col.subtitle.toLowerCase().includes('track')}
+                      · {col.trackCountHint} songs
+                    {/if}
+                  </div>
+                </div>
+              </button>
+            {/each}
+          </div>
+        {/if}
+        <div class="row">
+          <button class="btn ghost" onclick={close}>Cancel</button>
+          <button
+            class="btn primary"
+            disabled={ytmLoading || ytmSelected.size === 0}
+            onclick={confirmYtmImport}
+          >
+            {ytmSelected.size > 0 ? `Import Selected (${ytmSelected.size})` : 'Import Selected'}
+          </button>
+        </div>
       {/if}
     </div>
   </div>

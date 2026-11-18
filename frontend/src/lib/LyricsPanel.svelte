@@ -5,7 +5,7 @@
   import type { Lyrics } from './types'
 
   let lyrics = $state<Lyrics>({ synced: false, lines: [] })
-  let loadedFor = 0
+  let loadedFor = ''
   let body: HTMLDivElement | undefined = $state()
 
   $effect(() => {

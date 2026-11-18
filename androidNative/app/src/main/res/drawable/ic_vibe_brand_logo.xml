@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+
+    <!-- Dark Circular Badge -->
+    <path
+        android:pathData="M24,1.5 A22.5,22.5 0 1,1 23.9,1.5 Z"
+        android:fillColor="#141619" />
+
+    <!-- Green Circular Surrounding Ring -->
+    <path
+        android:pathData="M24,2.3 A21.7,21.7 0 1,1 23.9,2.3 Z"
+        android:strokeWidth="1.8"
+        android:strokeColor="#46CF68"
+        android:fillColor="#00000000" />
+
+    <!-- Equalizer Bars & Center V -->
+    <path
+        android:pathData="M12.34,17.09 L12.34,23.28"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+
+    <path
+        android:pathData="M16.46,13.68 L16.46,29.71"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+
+    <path
+        android:pathData="M20.54,23.09 L23.95,39.98 L27.79,20.11"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeColor="#46CF68"
+        android:fillColor="#00000000" />
+
+    <path
+        android:pathData="M31.54,9.79 L31.54,27.36"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+
+    <path
+        android:pathData="M35.66,15.46 L35.66,23.28"
+        android:strokeWidth="2.0"
+        android:strokeLineCap="round"
+        android:strokeColor="#46CF68" />
+</vector>

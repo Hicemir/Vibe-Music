@@ -5,7 +5,7 @@
   import type { DiscoverItem, Track } from './types'
 
   const r = $derived(core.route)
-  let plIds = $state<number[]>([])
+  let plIds = $state<string[]>([])
   let radioOnlineItems = $state<DiscoverItem[]>([])
   let radioOnlineLoading = $state(false)
   let radioOnlineSeed = $state(0)
@@ -19,7 +19,7 @@
         plIds = cached
       }
       Go.GetPlaylistTrackIDs(id).then((x) => {
-        const next = (x as number[]) ?? []
+        const next = (x as string[]) ?? []
         plIds = next
         core.playlistTrackMap = { ...core.playlistTrackMap, [id]: next }
       })
@@ -59,13 +59,14 @@
       case 'liked':
         return core.tracks.filter((t) => t.liked)
       case 'recent':
+        return core.tracks.slice(0, 50)
       case 'allsongs':
         return core.tracks
       case 'mostplayed':
         return core.tracks.filter((t) => t.playCount > 0).sort((a, b) => b.playCount - a.playCount)
       case 'album': {
         const key = norm(String(r.id).split('\u0000')[0])
-        return core.tracks.filter((t) => t.album && norm(t.album) === key).sort((a, b) => a.id - b.id)
+        return core.tracks.filter((t) => t.album && norm(t.album) === key).sort((a, b) => a.id.localeCompare(b.id))
       }
       case 'artist':
       case 'artistradio': {

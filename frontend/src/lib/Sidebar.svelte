@@ -17,8 +17,18 @@
 <div class="sidebar">
   <div class="box">
     <button class="brand" onclick={() => core.go({ name: 'home' })} title="Go to Home">
-      <div class="logo"><Icon name="play" size={18} /></div>
-      <span>Vibe Music</span>
+      <div class="logo">
+        <svg viewBox="0 0 48 48" width="32" height="32" aria-hidden="true">
+          <circle cx="24" cy="24" r="22.5" fill="#141619" />
+          <circle cx="24" cy="24" r="21.7" fill="none" stroke="#46CF68" stroke-width="1.8" />
+          <line x1="12.34" y1="17.09" x2="12.34" y2="23.28" stroke="#46CF68" stroke-width="2.0" stroke-linecap="round" />
+          <line x1="16.46" y1="13.68" x2="16.46" y2="29.71" stroke="#46CF68" stroke-width="2.0" stroke-linecap="round" />
+          <polyline points="20.54,23.09 23.95,39.98 27.79,20.11" fill="none" stroke="#46CF68" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" />
+          <line x1="31.54" y1="9.79" x2="31.54" y2="27.36" stroke="#46CF68" stroke-width="2.0" stroke-linecap="round" />
+          <line x1="35.66" y1="15.46" x2="35.66" y2="23.28" stroke="#46CF68" stroke-width="2.0" stroke-linecap="round" />
+        </svg>
+      </div>
+      <span class="brand-wordmark"><span class="vibe">Vibe</span><span class="music">Music</span></span>
       <span class="ver-badge">v{core.version}</span>
     </button>
     <button class="nav-item" class:active={active('home')} onclick={() => core.go({ name: 'home' })}><Icon name="home" size={22} />Home</button>
@@ -99,7 +109,7 @@
   {#if core.coverExpanded && t}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="expanded-cover-box" oncontextmenu={(e) => core.openMenu(e, trackMenu(t))}>
-      <Cover id={t.hasCover ? t.id : 0} />
+      <Cover id={t.hasCover ? t.id : ''} />
       <button
         class="cover-toggle-btn"
         onclick={() => (core.coverExpanded = false)}

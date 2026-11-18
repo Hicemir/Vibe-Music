@@ -4,7 +4,7 @@
   import Slider from './Slider.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu } from './menus'
-  import { fmtTime, splitArtists } from './util'
+  import { clamp, fmtTime, splitArtists } from './util'
 
   const p = $derived(core.player)
   const t = $derived(core.current)
@@ -15,6 +15,24 @@
       lastVol = n
       Go.SetVolume(Math.round(v))
     }
+  }
+
+  function onSeekWheel(e: WheelEvent) {
+    if (!p.loaded) return
+    const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? -e.deltaY : e.deltaX
+    if (delta === 0) return
+    e.preventDefault()
+    const step = delta > 0 ? 5 : -5
+    Go.Seek(clamp(p.position + step, 0, p.duration || 0))
+  }
+
+  function onVolWheel(e: WheelEvent) {
+    const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? -e.deltaY : e.deltaX
+    if (delta === 0) return
+    e.preventDefault()
+    const base = p.muted ? 0 : p.volume
+    const step = delta > 0 ? 5 : -5
+    Go.SetVolume(clamp(Math.round(base + step), 0, 100))
   }
 
   function sleepLabel() {
@@ -33,7 +51,7 @@
     {#if t}
       {#if !core.coverExpanded}
         <div class="pb-thumb-wrap">
-          <Cover id={t.hasCover ? t.id : 0} class="thumb" />
+          <Cover id={t.hasCover ? t.id : ''} class="thumb" />
           <button
             class="cover-toggle-btn"
             onclick={() => (core.coverExpanded = true)}
@@ -79,7 +97,7 @@
         aria-label="Repeat"><Icon name={p.repeat === 'one' ? 'repeat-one' : 'repeat'} size={22} /></button
       >
     </div>
-    <div class="pb-seek">
+    <div class="pb-seek" onwheel={onSeekWheel}>
       <span class="tm l">{fmtTime(p.position)}</span>
       <Slider value={p.position} max={p.duration || 1} disabled={!p.loaded} onchange={(v) => Go.Seek(v)} />
       <span class="tm r">{fmtTime(p.duration)}</span>
@@ -91,7 +109,7 @@
     <button class="icon-btn" class:on={core.panel === 'lyrics'} onclick={() => (core.panel = core.panel === 'lyrics' ? 'none' : 'lyrics')} title="Lyrics" aria-label="Lyrics"><Icon name="lyrics" size={20} /></button>
     <button class="icon-btn" class:on={core.panel === 'queue'} onclick={() => (core.panel = core.panel === 'queue' ? 'none' : 'queue')} title="Queue (Q)" aria-label="Queue"><Icon name="queue" size={20} /></button>
     <button class="icon-btn" class:on={p.sleepAt > 0 || p.sleepEnd} onclick={() => (core.modal = { type: 'sleep' })} title="Sleep timer" aria-label="Sleep timer"><Icon name="sleep" size={20} /></button>
-    <div class="vol">
+    <div class="vol" onwheel={onVolWheel}>
       <button
         class="icon-btn"
         onclick={() => Go.ToggleMute()}

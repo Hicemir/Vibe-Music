@@ -6,7 +6,7 @@
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu } from './menus'
-  import { buildQuickPicks, fmtTime, hasArtist, horizontalScroll, norm, splitArtists } from './util'
+  import { buildQuickPicks, fmtTime, hasArtist, norm, splitArtists } from './util'
   import type { DiscoverItem, Settings } from './types'
 
   const hour = new Date().getHours()
@@ -31,9 +31,10 @@
   let dragSec = $state<string | null>(null)
   let dragOverSec = $state<string | null>(null)
   let qpSeed = $state(0)
-  let qpCols = $state(6)
-  let qpScroller: HTMLDivElement | undefined = $state()
+  let qpCols = $state(36)
   let downloadingIds = $state<Record<string, boolean>>({})
+  const shelfEls: Record<string, HTMLElement | undefined> = {}
+  let shelfScrollState = $state<Record<string, { left: boolean; right: boolean }>>({})
 
   const homeOrder = $derived.by(() => {
     const raw = core.settings?.homeOrder
@@ -60,21 +61,8 @@
   const visibleSections = $derived(homeOrder.filter((id) => !hiddenSet.has(id)))
   const movableVisible = $derived(visibleSections.filter((id) => id !== 'allMusic'))
 
-  const qpRowsMode = $derived(core.settings?.quickPicksRows || '1')
-  const effectiveQuickRows = $derived.by(() => {
-    if (qpRowsMode === '2') return 2
-    if (qpRowsMode === '3') return 3
-    if (qpRowsMode === 'auto') {
-      let r = 1
-      if (hiddenSet.has('topTracks')) r++
-      if (hiddenSet.has('recentlyAdded')) r++
-      return r
-    }
-    return 1
-  })
-
   const allQuickPicks = $derived(buildQuickPicks(core.tracks, qpSeed))
-  const quickPickCount = $derived(qpCols * effectiveQuickRows)
+  const quickPickCount = $derived(qpCols)
   const visibleQuickPicks = $derived(allQuickPicks.slice(0, quickPickCount))
   const hasMoreQuickPicks = $derived(visibleQuickPicks.length < allQuickPicks.length)
 
@@ -84,16 +72,16 @@
       .sort((a, b) => b.lastPlayed - a.lastPlayed)
       .slice(0, 4),
   )
-  const recentlyAdded = $derived(core.tracks.slice(0, 14))
+  const recentlyAdded = $derived(core.tracks.slice(0, 36))
   const mostPlayed = $derived(
     core.tracks
       .filter((t) => t.playCount > 0)
       .sort((a, b) => b.playCount - a.playCount)
-      .slice(0, 14),
+      .slice(0, 36),
   )
 
   const artistRadios = $derived.by(() => {
-    const map = new Map<string, { name: string; score: number; count: number; covers: number[]; trackIds: number[] }>()
+    const map = new Map<string, { name: string; score: number; count: number; covers: string[]; trackIds: string[] }>()
     for (const t of core.tracks) {
       const sc = t.playCount * 10 + (t.liked ? 25 : 0) + 1
       for (const a of splitArtists(t.artist)) {
@@ -112,7 +100,7 @@
         }
       }
     }
-    return [...map.values()].sort((a, b) => b.score - a.score).slice(0, 10)
+    return [...map.values()].sort((a, b) => b.score - a.score).slice(0, 36)
   })
 
   $effect(() => {
@@ -184,8 +172,51 @@
     dragOverSec = null
   }
 
-  function setQpRows(mode: string) {
-    saveSettingsPatch({ quickPicksRows: mode })
+  function updateShelfState(secId: string) {
+    const el = shelfEls[secId]
+    if (!el) return
+    const left = el.scrollLeft > 2
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2
+    const cur = shelfScrollState[secId]
+    if (!cur || cur.left !== left || cur.right !== right) {
+      shelfScrollState[secId] = { left, right }
+    }
+  }
+
+  function shelfNav(node: HTMLElement, secId: string) {
+    let currentId = secId
+    shelfEls[currentId] = node
+    const update = () => updateShelfState(currentId)
+    const ro = new ResizeObserver(update)
+    const mo = new MutationObserver(() => requestAnimationFrame(update))
+    node.addEventListener('scroll', update, { passive: true })
+    ro.observe(node)
+    mo.observe(node, { childList: true })
+    requestAnimationFrame(update)
+    return {
+      update(newId: string) {
+        if (newId !== currentId) {
+          if (shelfEls[currentId] === node) delete shelfEls[currentId]
+          currentId = newId
+          shelfEls[currentId] = node
+          requestAnimationFrame(update)
+        }
+      },
+      destroy() {
+        node.removeEventListener('scroll', update)
+        ro.disconnect()
+        mo.disconnect()
+        if (shelfEls[currentId] === node) delete shelfEls[currentId]
+      },
+    }
+  }
+
+  function scrollShelf(secId: string, dir: -1 | 1) {
+    const el = shelfEls[secId]
+    if (!el) return
+    const cardStride = 186
+    const cardsPerPage = Math.max(1, Math.floor((el.clientWidth + 18) / cardStride))
+    el.scrollBy({ left: dir * cardsPerPage * cardStride, behavior: 'smooth' })
   }
 
   function toggleHomeSection(id: string) {
@@ -196,9 +227,9 @@
   }
 
   async function loadMoreQuickPicks() {
-    qpCols += 4
+    qpCols += 12
     await tick()
-    qpScroller?.scrollBy({ left: 540, behavior: 'smooth' })
+    scrollShelf('quickPicks', 1)
   }
 
   async function downloadDiscover(d: DiscoverItem) {
@@ -290,6 +321,30 @@
   </div>
 {/if}
 
+{#snippet shelfArrows(secId: string)}
+  {@const st = shelfScrollState[secId] ?? { left: false, right: false }}
+  <div class="shelf-arrows">
+    <button
+      class="shelf-arrow"
+      disabled={!st.left}
+      onclick={() => scrollShelf(secId, -1)}
+      title="Scroll left"
+      aria-label="Scroll left"
+    >
+      <Icon name="back" size={20} />
+    </button>
+    <button
+      class="shelf-arrow"
+      disabled={!st.right}
+      onclick={() => scrollShelf(secId, 1)}
+      title="Scroll right"
+      aria-label="Scroll right"
+    >
+      <Icon name="forward" size={20} />
+    </button>
+  </div>
+{/snippet}
+
 {#snippet reorderControls(secId: string)}
   {#if editingLayout && secId !== 'allMusic'}
     {@const idx = movableVisible.indexOf(secId)}
@@ -370,6 +425,7 @@
           <div style="display:flex;align-items:center;gap:10px">
             {#if mostPlayed.length > 0}
               <button class="link-btn" onclick={() => core.go({ name: 'mostplayed' })}>Show all</button>
+              {@render shelfArrows('topTracks')}
             {/if}
             {@render reorderControls('topTracks')}
           </div>
@@ -377,12 +433,12 @@
         {#if mostPlayed.length === 0}
           <div class="hint">Play some tracks and your most listened songs will appear here.</div>
         {:else}
-          <div class="shelf" use:horizontalScroll>
+          <div class="shelf" use:shelfNav={'topTracks'}>
             {#each mostPlayed as t, i (t.id)}
               <Card
                 title={t.title}
                 sub={t.artist}
-                id={t.hasCover ? t.id : 0}
+                id={t.hasCover ? t.id : ''}
                 playing={core.player.trackId === t.id && core.player.playing}
                 onclick={() => core.play(mostPlayed.map((x) => x.id), i)}
                 onplay={() => core.playInstant(t.id)}
@@ -414,20 +470,13 @@
             <div class="hint" style="margin-top:2px">Click any song to start a local radio mix, or hover the cover to preview.</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
-            {#if editingLayout}
-              <div class="seg qp-rows-seg" title="Quick picks row height">
-                {#each [{ v: '1', l: '1x' }, { v: '2', l: '2x' }, { v: '3', l: '3x' }, { v: 'auto', l: 'Auto' }] as opt}
-                  <button class:on={qpRowsMode === opt.v} onclick={() => setQpRows(opt.v)}>{opt.l}</button>
-                {/each}
-              </div>
-            {/if}
             <button
               class="btn ghost"
               style="display:flex;align-items:center;gap:6px"
               onclick={() => {
                 qpSeed++
-                qpCols = 6
-                qpScroller?.scrollTo({ left: 0, behavior: 'smooth' })
+                qpCols = 36
+                shelfEls['quickPicks']?.scrollTo({ left: 0, behavior: 'smooth' })
               }}
               title="Shuffle quick picks"
             >
@@ -438,65 +487,31 @@
                 <Icon name="plus" size={16} /> More
               </button>
             {/if}
+            {#if visibleQuickPicks.length > 0}
+              {@render shelfArrows('quickPicks')}
+            {/if}
             {@render reorderControls('quickPicks')}
           </div>
         </div>
 
-        <div
-          class="qp-strip"
-          bind:this={qpScroller}
-          use:horizontalScroll
-          style="--qp-rows: {effectiveQuickRows}"
-        >
-          {#each visibleQuickPicks as t (t.id)}
-            {@const isPlaying = core.player.trackId === t.id && core.player.playing}
-            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div
-              class="qp-card"
-              class:playing={core.player.trackId === t.id}
-              onclick={() => core.startRadio(t)}
-              oncontextmenu={(e) => core.openMenu(e, trackMenu(t))}
-            >
-              <div class="qp-thumb">
-                <Cover id={t.hasCover ? t.id : 0} class="thumb" />
-                <button
-                  class="mini-play-fab"
-                  class:playing={isPlaying}
-                  onclick={(e) => {
-                    e.stopPropagation()
-                    core.playInstant(t.id)
-                  }}
-                  title="Try song (plays without touching queue)"
-                  aria-label="Try song"
-                >
-                  <Icon name={isPlaying ? 'pause' : 'play'} size={16} />
-                </button>
-              </div>
-              <div class="qp-txt">
-                <div class="t-title">{t.title}</div>
-                <div class="t-artist">{t.artist}</div>
-              </div>
-              <button
-                class="more qp-more"
-                onclick={(e) => {
-                  e.stopPropagation()
-                  core.openMenu(e, trackMenu(t))
-                }}
-                title="More options"
-                aria-label="More options"
-              >
-                <Icon name="more" size={18} />
-              </button>
-            </div>
-          {/each}
-
-          {#if hasMoreQuickPicks}
-            <button class="qp-more-tile" onclick={loadMoreQuickPicks} title="Generate more quick picks">
-              <Icon name="plus" size={22} />
-              <span>More</span>
-            </button>
-          {/if}
-        </div>
+        {#if visibleQuickPicks.length === 0}
+          <div class="hint">Add or play some music and quick picks will appear here.</div>
+        {:else}
+          <div class="shelf" use:shelfNav={'quickPicks'}>
+            {#each visibleQuickPicks as t (t.id)}
+              <Card
+                title={t.title}
+                sub={t.artist}
+                id={t.hasCover ? t.id : ''}
+                playing={core.player.trackId === t.id && core.player.playing}
+                onclick={() => core.startRadio(t)}
+                onplay={() => core.playInstant(t.id)}
+                onmore={(e) => core.openMenu(e, trackMenu(t))}
+                oncontext={(e) => core.openMenu(e, trackMenu(t))}
+              />
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
 
@@ -518,19 +533,24 @@
             <h2>Artist radios</h2>
             <div class="hint" style="margin-top:2px">Non-stop artist mixes combining your local songs with new online discoveries.</div>
           </div>
-          {@render reorderControls('artistRadios')}
+          <div style="display:flex;align-items:center;gap:10px">
+            {#if artistRadios.length > 0}
+              {@render shelfArrows('artistRadios')}
+            {/if}
+            {@render reorderControls('artistRadios')}
+          </div>
         </div>
         {#if artistRadios.length === 0}
           <div class="hint">Add or play some music and artist radio stations will appear here.</div>
         {:else}
-          <div class="shelf" use:horizontalScroll>
+          <div class="shelf" use:shelfNav={'artistRadios'}>
             {#each artistRadios as ar (ar.name)}
               {@const seedTrack = core.tracks.find((t) => hasArtist(t, ar.name))}
               <Card
                 title="{ar.name} Radio"
                 sub="{ar.count} local song{ar.count === 1 ? '' : 's'} + online mix"
                 ids={ar.covers.length > 1 ? ar.covers : null}
-                id={ar.covers.length === 1 ? ar.covers[0] : 0}
+                id={ar.covers.length === 1 ? ar.covers[0] : ''}
                 icon="person"
                 onclick={() => core.go({ name: 'artistradio', id: ar.name })}
                 onplay={() => {
@@ -577,6 +597,9 @@
           >
             <Icon name="plus" size={16} /> More
           </button>
+          {#if core.discoverItems.length > 0}
+            {@render shelfArrows('discover')}
+          {/if}
           {@render reorderControls('discover')}
         </div>
       </div>
@@ -587,7 +610,7 @@
           No online suggestions loaded yet. Click <b>Refresh</b> to fetch recommendations from your library tracks.
         </div>
       {:else}
-        <div class="shelf" use:horizontalScroll>
+        <div class="shelf" use:shelfNav={'discover'}>
           {#each core.discoverItems as d (d.videoId)}
             <div class="card discover-card">
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -634,16 +657,17 @@
           <div style="display:flex;align-items:center;gap:10px">
             {#if recentlyAdded.length > 0}
               <button class="link-btn" onclick={() => core.go({ name: 'recent' })}>Show all</button>
+              {@render shelfArrows('recentlyAdded')}
             {/if}
             {@render reorderControls('recentlyAdded')}
           </div>
         </div>
-        <div class="shelf" use:horizontalScroll>
+        <div class="shelf" use:shelfNav={'recentlyAdded'}>
           {#each recentlyAdded as t, i (t.id)}
             <Card
               title={t.title}
               sub={t.artist}
-              id={t.hasCover ? t.id : 0}
+              id={t.hasCover ? t.id : ''}
               playing={core.player.trackId === t.id && core.player.playing}
               onclick={() => core.play(recentlyAdded.map((x) => x.id), i)}
               onplay={() => core.playInstant(t.id)}

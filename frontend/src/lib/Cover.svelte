@@ -3,11 +3,11 @@
   import { coverUrl } from './util'
 
   let {
-    id = 0,
+    id = '',
     ids = null,
     icon = 'note',
     class: cls = '',
-  }: { id?: number; ids?: number[] | null; icon?: string; class?: string } = $props()
+  }: { id?: string; ids?: string[] | null; icon?: string; class?: string } = $props()
   let failed = $state(false)
 </script>
 

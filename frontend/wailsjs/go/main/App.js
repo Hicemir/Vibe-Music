@@ -14,6 +14,10 @@ export function ArmWindowDrag() {
   return window['go']['main']['App']['ArmWindowDrag']();
 }
 
+export function BuildSapisidHashHeader(arg1) {
+  return window['go']['main']['App']['BuildSapisidHashHeader'](arg1);
+}
+
 export function CancelDownload(arg1) {
   return window['go']['main']['App']['CancelDownload'](arg1);
 }
@@ -40,6 +44,10 @@ export function DeletePlaylist(arg1) {
 
 export function ExportPlaylist(arg1, arg2) {
   return window['go']['main']['App']['ExportPlaylist'](arg1, arg2);
+}
+
+export function FetchYtMusicLibrary() {
+  return window['go']['main']['App']['FetchYtMusicLibrary']();
 }
 
 export function GetAllPlaylistTracks() {
@@ -90,12 +98,32 @@ export function GetVersion() {
   return window['go']['main']['App']['GetVersion']();
 }
 
+export function GetYtMusicStatus() {
+  return window['go']['main']['App']['GetYtMusicStatus']();
+}
+
 export function GetYtdlpStatus() {
   return window['go']['main']['App']['GetYtdlpStatus']();
 }
 
+export function HandleWebViewCookies(arg1, arg2) {
+  return window['go']['main']['App']['HandleWebViewCookies'](arg1, arg2);
+}
+
 export function ImportM3U() {
   return window['go']['main']['App']['ImportM3U']();
+}
+
+export function ImportYtMusicCollections(arg1) {
+  return window['go']['main']['App']['ImportYtMusicCollections'](arg1);
+}
+
+export function IsYtMusicLoggedIn() {
+  return window['go']['main']['App']['IsYtMusicLoggedIn']();
+}
+
+export function LogoutYtMusic() {
+  return window['go']['main']['App']['LogoutYtMusic']();
 }
 
 export function MinimiseWindow() {
@@ -238,6 +266,14 @@ export function StartDownloadToPlaylist(arg1, arg2) {
   return window['go']['main']['App']['StartDownloadToPlaylist'](arg1, arg2);
 }
 
+export function StartYtMusicLogin() {
+  return window['go']['main']['App']['StartYtMusicLogin']();
+}
+
+export function SyncYtMusicLibrary() {
+  return window['go']['main']['App']['SyncYtMusicLibrary']();
+}
+
 export function ToggleLike(arg1) {
   return window['go']['main']['App']['ToggleLike'](arg1);
 }
@@ -256,6 +292,10 @@ export function TogglePlayPause() {
 
 export function TrashTrack(arg1) {
   return window['go']['main']['App']['TrashTrack'](arg1);
+}
+
+export function TryExtractBrowserCookies(arg1) {
+  return window['go']['main']['App']['TryExtractBrowserCookies'](arg1);
 }
 
 export function UpdateYtdlp() {

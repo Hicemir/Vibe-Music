@@ -164,7 +164,7 @@
       </button>
     </div>
     <div class="info">
-      <Cover id={t.hasCover ? t.id : 0} class="thumb" />
+      <Cover id={t.hasCover ? t.id : ''} class="thumb" />
       <div class="txt">
         <div class="t-title">{t.title}</div>
         <div class="t-artist">

@@ -14,7 +14,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 class DownloadJobAdapter(
-    private val onCancelClick: ((DownloadJob) -> Unit)? = null
+    private val onCancelClick: ((DownloadJob) -> Unit)? = null,
+    private val onRetryClick: ((DownloadJob) -> Unit)? = null
 ) : RecyclerView.Adapter<DownloadJobAdapter.ViewHolder>() {
 
     private val jobs = mutableListOf<DownloadJob>()
@@ -48,6 +49,13 @@ class DownloadJobAdapter(
             val pos = holder.bindingAdapterPosition
             val currentJob = if (pos in jobs.indices) jobs[pos] else job
             onCancelClick?.invoke(currentJob)
+        }
+        holder.icon.setOnClickListener {
+            val pos = holder.bindingAdapterPosition
+            val currentJob = if (pos in jobs.indices) jobs[pos] else job
+            if (currentJob.status == "error" || currentJob.status == "cancelled") {
+                onRetryClick?.invoke(currentJob)
+            }
         }
     }
 
@@ -92,6 +100,7 @@ class DownloadJobAdapter(
 
                 attachCircularDrawable(holder.icon)
                     .update(CircularDownloadDrawable.State.DOWNLOADING, job.progress)
+                holder.icon.isClickable = false
                 holder.cancelBtn.visibility = View.VISIBLE
             }
             "pending" -> {
@@ -99,6 +108,7 @@ class DownloadJobAdapter(
                 holder.speedEta.text = "Waiting..."
                 attachCircularDrawable(holder.icon)
                     .update(CircularDownloadDrawable.State.PENDING, 0f)
+                holder.icon.isClickable = false
                 holder.cancelBtn.visibility = View.VISIBLE
             }
             "done" -> {
@@ -114,23 +124,26 @@ class DownloadJobAdapter(
                 holder.speedEta.text = ""
                 attachCircularDrawable(holder.icon)
                     .update(CircularDownloadDrawable.State.DONE, 100f)
+                holder.icon.isClickable = false
                 holder.cancelBtn.visibility = View.GONE
             }
             "error" -> {
-                holder.info.text = "Error: ${job.error ?: "Failed"}"
+                holder.info.text = "Tap \u21bb to retry \u2022 Error: ${job.error ?: "Failed"}"
                 holder.speedEta.text = ""
                 holder.icon.imageTintList = null
-                holder.icon.setImageResource(R.drawable.ic_close)
-                holder.icon.setColorFilter(ContextCompat.getColor(context, R.color.accent_red))
-                holder.cancelBtn.visibility = View.GONE
+                holder.icon.setImageResource(R.drawable.ic_refresh)
+                holder.icon.setColorFilter(ContextCompat.getColor(context, R.color.accent_green))
+                holder.icon.isClickable = true
+                holder.cancelBtn.visibility = View.VISIBLE
             }
             "cancelled" -> {
-                holder.info.text = job.error ?: "Cancelled"
+                holder.info.text = "Tap \u21bb to retry \u2022 ${job.error ?: "Cancelled"}"
                 holder.speedEta.text = ""
                 holder.icon.imageTintList = null
-                holder.icon.setImageResource(R.drawable.ic_close)
-                holder.icon.setColorFilter(ContextCompat.getColor(context, R.color.text_muted))
-                holder.cancelBtn.visibility = View.GONE
+                holder.icon.setImageResource(R.drawable.ic_refresh)
+                holder.icon.setColorFilter(ContextCompat.getColor(context, R.color.accent_green))
+                holder.icon.isClickable = true
+                holder.cancelBtn.visibility = View.VISIBLE
             }
             else -> {
                 holder.info.text = job.status
@@ -138,6 +151,7 @@ class DownloadJobAdapter(
                 holder.icon.imageTintList = null
                 holder.icon.setImageResource(R.drawable.ic_download)
                 holder.icon.setColorFilter(ContextCompat.getColor(context, R.color.text_muted))
+                holder.icon.isClickable = false
                 holder.cancelBtn.visibility = View.GONE
             }
         }

@@ -29,7 +29,14 @@ object CanonicalKey {
     )
     private val NON_ALNUM_UNICODE_RE = Regex("[^\\p{L}\\p{N}\\s]")
     private val MULTI_SPACE_RE = Regex("\\s+")
+    private val COMBINING_MARKS_RE = Regex("\\p{InCombiningDiacriticalMarks}+")
+    private val NON_ALNUM_SEP_RE = Regex("[^\\p{L}\\p{N}]+")
     private val TITLE_SEPARATORS = listOf(" - ", " – ", " — ", " | ", ": ")
+    private val META_STOP_WORDS = setOf(
+        "the", "and", "for", "from", "with", "feat", "ver", "version",
+        "original", "soundtrack", "ost", "music", "song", "theme",
+        "edit", "mix", "remaster", "remastered"
+    )
 
     fun isValidYtId(id: String): Boolean {
         return YT_ID_RE.matcher(id).matches()
@@ -258,9 +265,46 @@ object CanonicalKey {
         return keys
     }
 
-    fun titleTokens(title: String): List<String> {
-        val cleaned = title.lowercase().replace(Regex("[^a-z0-9\\s]"), " ")
-        return cleaned.split(Regex("\\s+")).filter { it.length >= 3 }
+    fun titleTokens(title: String): List<String> = metaTokens(title, "")
+
+    fun metaTokens(title: String, album: String = ""): List<String> {
+        val raw = normFold("$title $album")
+        if (raw.isEmpty()) return emptyList()
+        val seen = linkedSetOf<String>()
+        for (w in NON_ALNUM_SEP_RE.split(raw)) {
+            if (w.isEmpty() || META_STOP_WORDS.contains(w)) continue
+            val isLongEnough = w.length >= 3 || (w.length >= 2 && w.any { it.code > 127 })
+            if (isLongEnough) seen.add(w)
+        }
+        return seen.toList()
+    }
+
+    /** NFKD lowercase without combining diacritics — handles Sān-Z / San-Z, Beyoncé / Beyonce. */
+    fun normFold(s: String): String {
+        val decomposed = Normalizer.normalize(s.trim().lowercase(), Normalizer.Form.NFKD)
+        return COMBINING_MARKS_RE.replace(decomposed, "")
+    }
+
+    fun normName(s: String): String {
+        val folded = normFold(s)
+        val sb = StringBuilder(folded.length)
+        for (c in folded) {
+            if (c == '.' || c == '\'' || c == '’' || c == '"') continue
+            sb.append(c)
+        }
+        return MULTI_SPACE_RE.replace(sb.toString(), " ").trim()
+    }
+
+    fun stripTitleDecorations(rawTitle: String): String = stripTitleNoise(rawTitle)
+
+    fun trackVideoId(track: Track): String {
+        val y = track.ytId?.trim().orEmpty()
+        if (isValidYtId(y)) return y
+        if (track.id.startsWith("yt:")) {
+            val sub = track.id.removePrefix("yt:")
+            if (isValidYtId(sub)) return sub
+        }
+        return ""
     }
 
     private fun bytesToHex(bytes: ByteArray): String {

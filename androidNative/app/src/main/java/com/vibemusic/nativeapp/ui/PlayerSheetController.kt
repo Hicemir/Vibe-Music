@@ -148,8 +148,8 @@ class PlayerSheetController(
     private var lastRecyclerPadBottom = -1
 
     // Dynamic album colors
-    private val defaultBgColor = ContextCompat.getColor(context, R.color.bg_primary)
-    private val defaultSurfaceColor = ContextCompat.getColor(context, R.color.bg_surface_elevated)
+    internal val defaultBgColor = ContextCompat.getColor(context, R.color.bg_primary)
+    internal val defaultSurfaceColor = ContextCompat.getColor(context, R.color.bg_surface_elevated)
     private var currentBgColor = defaultBgColor
     private var currentSurfaceColor = defaultSurfaceColor
 
@@ -1107,7 +1107,12 @@ class PlayerSheetController(
     // Track Metadata & Dynamic Album Color Palette Sync
     // -------------------------------------------------------------
 
-    fun updateTrackInfo(title: String, artist: String, bitmap: Bitmap?) {
+    fun updateTrackInfo(
+        title: String,
+        artist: String,
+        bitmap: Bitmap?,
+        precomputedPalette: Pair<Int, Int>? = null
+    ) {
         npMiniFadeTitle.text = title
         npMiniFadeArtist.text = artist
         npCompactTitle.text = title
@@ -1115,7 +1120,7 @@ class PlayerSheetController(
 
         if (bitmap != null) {
             npCover.setImageBitmap(bitmap)
-            val (bg, surface) = extractDarkPalette(bitmap)
+            val (bg, surface) = precomputedPalette ?: extractDarkPalette(bitmap)
             animateColorsTo(bg, surface)
         } else {
             npCover.setImageResource(R.drawable.ic_music_note)
@@ -1130,42 +1135,48 @@ class PlayerSheetController(
     }
 
     private fun extractDarkPalette(bmp: Bitmap): Pair<Int, Int> {
-        val small = Bitmap.createScaledBitmap(bmp, 16, 16, true)
-        var rSum = 0f
-        var gSum = 0f
-        var bSum = 0f
-        var weightSum = 0f
+        return computeDarkPalette(bmp, defaultBgColor, defaultSurfaceColor)
+    }
 
-        for (y in 0 until small.height) {
-            for (x in 0 until small.width) {
-                val pixel = small.getPixel(x, y)
-                val r = Color.red(pixel)
-                val g = Color.green(pixel)
-                val b = Color.blue(pixel)
-                val spread = max(r, max(g, b)) - min(r, min(g, b))
-                val weight = 1f + (spread / 255f) * 2.5f
-                rSum += r * weight
-                gSum += g * weight
-                bSum += b * weight
-                weightSum += weight
+    companion object {
+        fun computeDarkPalette(bmp: Bitmap, defaultBg: Int, defaultSurface: Int): Pair<Int, Int> {
+            val small = Bitmap.createScaledBitmap(bmp, 16, 16, true)
+            var rSum = 0f
+            var gSum = 0f
+            var bSum = 0f
+            var weightSum = 0f
+
+            for (y in 0 until small.height) {
+                for (x in 0 until small.width) {
+                    val pixel = small.getPixel(x, y)
+                    val r = Color.red(pixel)
+                    val g = Color.green(pixel)
+                    val b = Color.blue(pixel)
+                    val spread = max(r, max(g, b)) - min(r, min(g, b))
+                    val weight = 1f + (spread / 255f) * 2.5f
+                    rSum += r * weight
+                    gSum += g * weight
+                    bSum += b * weight
+                    weightSum += weight
+                }
             }
+            if (small !== bmp) small.recycle()
+
+            if (weightSum <= 0f) return defaultBg to defaultSurface
+
+            val avgColor = Color.rgb(
+                (rSum / weightSum).toInt().coerceIn(0, 255),
+                (gSum / weightSum).toInt().coerceIn(0, 255),
+                (bSum / weightSum).toInt().coerceIn(0, 255)
+            )
+            val hsv = FloatArray(3)
+            Color.colorToHSV(avgColor, hsv)
+
+            val sat = if (hsv[1] < 0.08f) 0f else (hsv[1] * 0.80f).coerceIn(0.14f, 0.52f)
+            val bgColor = Color.HSVToColor(floatArrayOf(hsv[0], sat, 0.14f))
+            val surfaceColor = Color.HSVToColor(floatArrayOf(hsv[0], (sat * 0.90f).coerceAtMost(0.45f), 0.21f))
+            return bgColor to surfaceColor
         }
-        if (small !== bmp) small.recycle()
-
-        if (weightSum <= 0f) return defaultBgColor to defaultSurfaceColor
-
-        val avgColor = Color.rgb(
-            (rSum / weightSum).toInt().coerceIn(0, 255),
-            (gSum / weightSum).toInt().coerceIn(0, 255),
-            (bSum / weightSum).toInt().coerceIn(0, 255)
-        )
-        val hsv = FloatArray(3)
-        Color.colorToHSV(avgColor, hsv)
-
-        val sat = if (hsv[1] < 0.08f) 0f else (hsv[1] * 0.80f).coerceIn(0.14f, 0.52f)
-        val bgColor = Color.HSVToColor(floatArrayOf(hsv[0], sat, 0.14f))
-        val surfaceColor = Color.HSVToColor(floatArrayOf(hsv[0], (sat * 0.90f).coerceAtMost(0.45f), 0.21f))
-        return bgColor to surfaceColor
     }
 
     private fun animateColorsTo(targetBg: Int, targetSurface: Int) {

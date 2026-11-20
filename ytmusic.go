@@ -1053,7 +1053,9 @@ func (a *App) fetchPlaylistsViaYtdlp() []YtMusicCollection {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	args := []string{"--flat-playlist", "-J", "--no-warnings"}
-	args = append(args, cookieArgs(a.Settings())...)
+	cArgs, cookieCleanup := tempCookieArgs(a.Settings())
+	defer cookieCleanup()
+	args = append(args, cArgs...)
 	args = append(args, "https://music.youtube.com/library/playlists")
 	cmd := exec.CommandContext(ctx, ytdlpPath, args...)
 	setCmdHidden(cmd)
@@ -1122,8 +1124,9 @@ func (a *App) fetchTracksViaYtdlp(col YtMusicCollection) []YtMusicTrackItem {
 		addURL("https://music.youtube.com/browse/" + col.BrowseID)
 	}
 
-	cArgs := cookieArgs(a.Settings())
+	set := a.Settings()
 	for _, targetURL := range candidates {
+		cArgs, cookieCleanup := tempCookieArgs(set)
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		args := []string{"--flat-playlist", "-J", "--no-warnings"}
 		args = append(args, cArgs...)
@@ -1132,6 +1135,7 @@ func (a *App) fetchTracksViaYtdlp(col YtMusicCollection) []YtMusicTrackItem {
 		setCmdHidden(cmd)
 		raw, err := cmd.Output()
 		cancel()
+		cookieCleanup()
 		if err != nil || len(raw) == 0 {
 			continue
 		}

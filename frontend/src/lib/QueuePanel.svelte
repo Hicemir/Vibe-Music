@@ -54,7 +54,7 @@
       {@const t = core.byId.get(current.tid)!}
       <div class="q-label">Now playing</div>
       <div class="q-row current">
-        <Cover id={t.hasCover ? t.id : ''} class="thumb" />
+        <Cover id={t.hasCover ? t.id : ''} class="thumb" size={128} />
         <div class="txt">
           <div class="t-title">{t.title}</div>
           <div class="t-artist">{t.artist}</div>
@@ -97,7 +97,7 @@
             }}
           >
             <span class="grip"><Icon name="drag" size={18} /></span>
-            <Cover id={t.hasCover ? t.id : ''} class="thumb" />
+            <Cover id={t.hasCover ? t.id : ''} class="thumb" size={128} />
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <div class="txt" ondblclick={() => Go.PlayQueueIndex(i)} onclick={() => Go.PlayQueueIndex(i)}>
               <div class="t-title">{t.title}</div>

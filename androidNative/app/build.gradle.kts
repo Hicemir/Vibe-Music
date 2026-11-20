@@ -11,8 +11,8 @@ android {
         applicationId = "com.vibemusic.nativeapp"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.5.0"
+        versionCode = 6
+        versionName = "0.6.2"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -31,7 +31,8 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

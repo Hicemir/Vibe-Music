@@ -14,7 +14,7 @@
     if (delta === 0) return
     e.preventDefault()
     const step = delta > 0 ? 5 : -5
-    Go.Seek(clamp(p.position + step, 0, p.duration || 0))
+    Go.Seek(clamp(core.position + step, 0, core.duration || 0))
   }
 
   function expand() {
@@ -31,7 +31,7 @@
   }}
 >
   <div class="row1">
-    <Cover id={t && t.hasCover ? t.id : ''} class="thumb" />
+    <Cover id={t && t.hasCover ? t.id : ''} class="thumb" size={128} />
     <div class="txt">
       <div class="t-title">{t ? t.title : 'Nothing playing'}</div>
       <div class="t-artist">{t ? t.artist : ''}</div>
@@ -40,9 +40,9 @@
     <button class="icon-btn" onclick={() => Go.CloseWindow()} title="Close" aria-label="Close"><Icon name="close" size={18} /></button>
   </div>
   <div class="pb-seek" onwheel={onSeekWheel}>
-    <span class="tm l" style="width:34px">{fmtTime(p.position)}</span>
-    <Slider value={p.position} max={p.duration || 1} disabled={!p.loaded} onchange={(v) => Go.Seek(v)} />
-    <span class="tm r" style="width:34px">{fmtTime(p.duration)}</span>
+    <span class="tm l" style="width:34px">{fmtTime(core.position)}</span>
+    <Slider value={core.position} max={core.duration || 1} disabled={!p.loaded} onchange={(v) => Go.Seek(v)} />
+    <span class="tm r" style="width:34px">{fmtTime(core.duration)}</span>
   </div>
   <div class="ctrl">
     <button class="icon-btn" class:on={p.shuffle} onclick={() => Go.SetShuffle(!p.shuffle)} aria-label="Shuffle"><Icon name="shuffle" size={20} /></button>

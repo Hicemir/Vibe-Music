@@ -26,7 +26,7 @@
 
   function onWindowMouseMove(e: MouseEvent) {
     if (e.clientY <= 12) {
-      topBarVisible = true
+      if (!topBarVisible) topBarVisible = true
     } else if (topBarVisible && e.clientY > 40) {
       topBarVisible = false
     }
@@ -201,7 +201,7 @@
           <Home />
         {:else if r.name === 'playlists'}
           <Playlists />
-        {:else if r.name === 'playlist' || r.name === 'liked' || r.name === 'recent' || r.name === 'mostplayed' || r.name === 'allsongs' || r.name === 'album' || r.name === 'artist' || r.name === 'artistradio'}
+        {:else if r.name === 'playlist' || r.name === 'liked' || r.name === 'recent' || r.name === 'mostplayed' || r.name === 'allsongs' || r.name === 'album' || r.name === 'artist' || r.name === 'artistradio' || r.name === 'quickpick'}
           <CollectionPage />
         {:else if r.name === 'albums'}
           <Groups mode="albums" />

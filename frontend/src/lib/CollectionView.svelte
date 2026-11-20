@@ -4,36 +4,48 @@
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu, tracksMenu } from './menus'
-  import { fmtDuration, fmtTime, matches, recommendForPlaylist, samplePool, splitArtists } from './util'
+  import { fmtDuration, fmtTime, matches, recommendForPlaylist, samplePool, splitArtists, fallbackYtThumb } from './util'
   import type { DiscoverItem, MenuItem, Playlist, Track } from './types'
 
   let {
     kind,
     title,
+    subtitle = '',
     tracks,
     coverIds = [],
     playlist = null,
     round = false,
     icon = 'note',
     sortable = true,
+    isPlayingOverride,
     onlineTracks = [],
     onlineLoading = false,
     onrefreshonline,
+    onrefreshmix,
+    refreshMixHint = '',
+    onplayall,
+    onplaytrack,
     onreorder,
     onremove,
     onadd,
   }: {
     kind: string
     title: string
+    subtitle?: string
     tracks: Track[]
     coverIds?: string[]
     playlist?: Playlist | null
     round?: boolean
     icon?: string
     sortable?: boolean
+    isPlayingOverride?: boolean
     onlineTracks?: DiscoverItem[]
     onlineLoading?: boolean
     onrefreshonline?: () => void
+    onrefreshmix?: () => void
+    refreshMixHint?: string
+    onplayall?: () => void
+    onplaytrack?: (ids: string[], index: number) => void
     onreorder?: (from: number, to: number) => void
     onremove?: (t: Track) => void
     onadd?: (t: Track) => void
@@ -88,10 +100,12 @@
   const total = $derived(tracks.reduce((s, t) => s + t.duration, 0))
   const playlistId = $derived(playlist?.id ?? 0)
   const isCurrentCollection = $derived(
-    core.player.playing && (playlist ? core.player.playlistId === playlist.id : ids.includes(core.player.trackId)),
+    isPlayingOverride !== undefined
+      ? isPlayingOverride
+      : core.player.playing && (playlist ? core.player.playlistId === playlist.id : ids.includes(core.player.trackId)),
   )
 
-  const FIND_LIMIT = 12
+  const FIND_LIMIT = 6
   const SUGGEST_LIMIT = 8
 
   let findOrderedIds = $state<string[]>([])
@@ -133,9 +147,13 @@
     }
   })
 
+  const genreSig = $derived(
+    `${core.genreStatus.identified}:${core.genreStatus.aiIdentified}:${core.tracks.reduce((s, t) => s + (t.genres?.length ?? 0), 0)}`,
+  )
+
   $effect(() => {
     const hasTracks = tracks.length > 0 ? '1' : '0'
-    const rk = `${playlistId}|${recSeed}|${core.tracks.length}|${hasTracks}`
+    const rk = `${playlistId}|${recSeed}|${tracks.length}|${core.tracks.length}|${hasTracks}|${genreSig}`
     if (rk !== lastRecKey) {
       lastRecKey = rk
       buildSuggestionOrder(recSeed)
@@ -221,6 +239,10 @@
   }
 
   function playAll() {
+    if (onplayall) {
+      onplayall()
+      return
+    }
     if (playlist) {
       core.togglePlaylist(playlist.id)
       return
@@ -282,7 +304,7 @@
     <div class="kind">{kind}</div>
     <h1>{title}</h1>
     <div class="meta">
-      {tracks.length} local song{tracks.length === 1 ? '' : 's'}{#if onlineTracks.length > 0} · {onlineTracks.length} online discovery song{onlineTracks.length === 1 ? '' : 's'}{/if}{#if total > 0} · {fmtDuration(total)}{/if}
+      {#if subtitle}{subtitle} · {/if}{tracks.length} local song{tracks.length === 1 ? '' : 's'}{#if onlineTracks.length > 0} · {onlineTracks.length} online discovery song{onlineTracks.length === 1 ? '' : 's'}{/if}{#if total > 0} · {fmtDuration(total)}{/if}
     </div>
   </div>
 </div>
@@ -295,6 +317,12 @@
     <Icon name="shuffle" size={30} />
   </button>
   <button class="icon-btn" onclick={moreMenu} aria-label="More options"><Icon name="more" size={30} /></button>
+  {#if onrefreshmix}
+    <button class="btn ghost" style="display:inline-flex;align-items:center;gap:6px" onclick={onrefreshmix}>
+      <Icon name="refresh" size={16} />
+      <span>Refresh mix</span>
+    </button>
+  {/if}
   {#if onlineTracks.length > 0 || onlineLoading}
     <button
       class="btn ghost"
@@ -333,10 +361,21 @@
   bind:sortKey
   bind:sortDir
   reorderable={!!onreorder && !filter.trim() && !sortKey}
+  {onplaytrack}
   {onreorder}
   {onremove}
   showAlbum={true}
 />
+
+{#if onrefreshmix}
+  <div class="pl-bottom" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+    <div class="hint">{refreshMixHint || 'Refresh to generate a new selection for this mix.'}</div>
+    <button class="btn ghost" style="display:inline-flex;align-items:center;gap:6px" onclick={onrefreshmix}>
+      <Icon name="refresh" size={16} />
+      <span>Refresh mix</span>
+    </button>
+  </div>
+{/if}
 
 {#if onlineLoading && onlineTracks.length === 0}
   <div class="pl-bottom">
@@ -377,7 +416,7 @@
               onclick={() => (Go as any).OpenInBrowser?.(d.url)}
               title="Open in browser (YouTube)"
             >
-              <div class="cover thumb"><img src={d.thumbUrl} alt="" loading="lazy" /></div>
+              <div class="cover thumb"><img src={d.thumbUrl} alt="" loading="lazy" decoding="async" onload={fallbackYtThumb} onerror={fallbackYtThumb} /></div>
               <div class="mini-play-fab" style="pointer-events:none">
                 <Icon name="external" size={14} />
               </div>
@@ -442,7 +481,7 @@
               oncontextmenu={(e) => core.openMenu(e, trackMenu(t))}
             >
               <div class="add-thumb">
-                <Cover id={t.hasCover ? t.id : ''} class="thumb" />
+                <Cover id={t.hasCover ? t.id : ''} class="thumb" size={128} />
                 <button
                   class="mini-play-fab"
                   class:playing={isPlaying}
@@ -508,7 +547,7 @@
                     onclick={() => (Go as any).OpenInBrowser?.(d.url)}
                     title="Open in browser (YouTube)"
                   >
-                    <div class="cover thumb"><img src={d.thumbUrl} alt="" loading="lazy" /></div>
+                    <div class="cover thumb"><img src={d.thumbUrl} alt="" loading="lazy" decoding="async" onload={fallbackYtThumb} onerror={fallbackYtThumb} /></div>
                     <div class="mini-play-fab" style="pointer-events:none">
                       <Icon name="external" size={14} />
                     </div>
@@ -542,7 +581,7 @@
           <div>
             <h2>Suggested songs</h2>
             <div class="hint" style="margin-top:4px">
-              {tracks.length > 0 ? 'Recommended from your local library based on artists, playlists, soundtracks, and titles' : 'Popular and liked songs from your local library'}
+              {tracks.length > 0 ? 'Recommended from your local library based on artists, albums, titles, genres, and playlists' : 'Popular and liked songs from your local library'}
             </div>
           </div>
           <button class="btn ghost" style="display:flex;align-items:center;gap:6px" onclick={() => recSeed++}>
@@ -564,7 +603,7 @@
               oncontextmenu={(e) => core.openMenu(e, trackMenu(t))}
             >
               <div class="add-thumb">
-                <Cover id={t.hasCover ? t.id : ''} class="thumb" />
+                <Cover id={t.hasCover ? t.id : ''} class="thumb" size={128} />
                 <button
                   class="mini-play-fab"
                   class:playing={isPlaying}

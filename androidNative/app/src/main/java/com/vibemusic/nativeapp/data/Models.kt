@@ -1,5 +1,6 @@
 package com.vibemusic.nativeapp.data
 
+import com.vibemusic.nativeapp.genre.GenreTaxonomy
 import java.io.File
 
 data class Track(
@@ -22,8 +23,12 @@ data class Track(
     val fileSize: Long = 0L,
     val mtimeUnix: Long = 0L,
     val updatedAt: Long = 0L,
-    var resolvedPath: String = ""
+    var resolvedPath: String = "",
+    val genre: String = "",
+    val genreSource: String = ""
 ) {
+    val genres: List<String>
+        get() = GenreTaxonomy.splitGenres(genre)
     val displayTitle: String
         get() = title.ifBlank {
             File(relPath).nameWithoutExtension.ifBlank { "Unknown Title" }
@@ -50,6 +55,18 @@ data class Playlist(
     val coverTracks: List<String> = emptyList()
 )
 
+data class AiGenreSettings(
+    val enabled: Boolean = false,
+    val autoOnNew: Boolean = false,
+    val provider: String = "gemini",
+    val baseUrl: String = "",
+    val apiKey: String = "",
+    val model: String = "gemini-3.5-flash-lite",
+    val allowCustomGenres: Boolean = false,
+    val webSearch: Boolean = true,
+    val geminiGrounding: Boolean = false
+)
+
 data class AppSettings(
     val musicDirs: List<String> = emptyList(),
     val downloadDir: String = "",
@@ -74,7 +91,8 @@ data class AppSettings(
     ),
     // Online Discovery is off by default
     val homeHidden: Set<String> = setOf("discover"),
-    val enableOnlineFeatures: Boolean = true
+    val enableOnlineFeatures: Boolean = true,
+    val ai: AiGenreSettings = AiGenreSettings()
 )
 
 data class DiscoverItem(

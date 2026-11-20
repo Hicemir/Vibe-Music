@@ -22,8 +22,20 @@ export function CancelDownload(arg1) {
   return window['go']['main']['App']['CancelDownload'](arg1);
 }
 
+export function CancelGenreDetection() {
+  return window['go']['main']['App']['CancelGenreDetection']();
+}
+
+export function CancelLocalAIDownload() {
+  return window['go']['main']['App']['CancelLocalAIDownload']();
+}
+
 export function ClearDownloads() {
   return window['go']['main']['App']['ClearDownloads']();
+}
+
+export function ClearPendingAI() {
+  return window['go']['main']['App']['ClearPendingAI']();
 }
 
 export function ClearQueue() {
@@ -34,12 +46,36 @@ export function CloseWindow() {
   return window['go']['main']['App']['CloseWindow']();
 }
 
+export function CountMovable(arg1, arg2) {
+  return window['go']['main']['App']['CountMovable'](arg1, arg2);
+}
+
 export function CreatePlaylist(arg1, arg2) {
   return window['go']['main']['App']['CreatePlaylist'](arg1, arg2);
 }
 
+export function DeleteAllLocalAI() {
+  return window['go']['main']['App']['DeleteAllLocalAI']();
+}
+
+export function DeleteLocalModel(arg1) {
+  return window['go']['main']['App']['DeleteLocalModel'](arg1);
+}
+
 export function DeletePlaylist(arg1) {
   return window['go']['main']['App']['DeletePlaylist'](arg1);
+}
+
+export function DetectGenres() {
+  return window['go']['main']['App']['DetectGenres']();
+}
+
+export function DetectGenresAI(arg1) {
+  return window['go']['main']['App']['DetectGenresAI'](arg1);
+}
+
+export function DownloadLocalAI(arg1, arg2) {
+  return window['go']['main']['App']['DownloadLocalAI'](arg1, arg2);
 }
 
 export function ExportPlaylist(arg1, arg2) {
@@ -48,6 +84,10 @@ export function ExportPlaylist(arg1, arg2) {
 
 export function FetchYtMusicLibrary() {
   return window['go']['main']['App']['FetchYtMusicLibrary']();
+}
+
+export function GetAIProviders() {
+  return window['go']['main']['App']['GetAIProviders']();
 }
 
 export function GetAllPlaylistTracks() {
@@ -62,8 +102,32 @@ export function GetDownloads() {
   return window['go']['main']['App']['GetDownloads']();
 }
 
+export function GetGenreStatus() {
+  return window['go']['main']['App']['GetGenreStatus']();
+}
+
+export function GetGenreTargets() {
+  return window['go']['main']['App']['GetGenreTargets']();
+}
+
+export function GetGenreTaxonomy() {
+  return window['go']['main']['App']['GetGenreTaxonomy']();
+}
+
+export function GetLocalAIModels() {
+  return window['go']['main']['App']['GetLocalAIModels']();
+}
+
+export function GetLocalAIStatus() {
+  return window['go']['main']['App']['GetLocalAIStatus']();
+}
+
 export function GetLyrics(arg1) {
   return window['go']['main']['App']['GetLyrics'](arg1);
+}
+
+export function GetMoveStatus() {
+  return window['go']['main']['App']['GetMoveStatus']();
 }
 
 export function GetOnlineDiscovery(arg1) {
@@ -134,6 +198,10 @@ export function MoveInQueue(arg1, arg2) {
   return window['go']['main']['App']['MoveInQueue'](arg1, arg2);
 }
 
+export function MoveMusic(arg1, arg2) {
+  return window['go']['main']['App']['MoveMusic'](arg1, arg2);
+}
+
 export function Next() {
   return window['go']['main']['App']['Next']();
 }
@@ -170,6 +238,10 @@ export function PickFolder() {
   return window['go']['main']['App']['PickFolder']();
 }
 
+export function PickGGUFFile() {
+  return window['go']['main']['App']['PickGGUFFile']();
+}
+
 export function PlayInstant(arg1) {
   return window['go']['main']['App']['PlayInstant'](arg1);
 }
@@ -192,6 +264,10 @@ export function Previous() {
 
 export function QuitApp() {
   return window['go']['main']['App']['QuitApp']();
+}
+
+export function RedetectGenres() {
+  return window['go']['main']['App']['RedetectGenres']();
 }
 
 export function RemoveFromQueue(arg1) {
@@ -242,6 +318,10 @@ export function SetSleepTimer(arg1) {
   return window['go']['main']['App']['SetSleepTimer'](arg1);
 }
 
+export function SetTracksGenre(arg1, arg2) {
+  return window['go']['main']['App']['SetTracksGenre'](arg1, arg2);
+}
+
 export function SetVolume(arg1) {
   return window['go']['main']['App']['SetVolume'](arg1);
 }
@@ -272,6 +352,10 @@ export function StartYtMusicLogin() {
 
 export function SyncYtMusicLibrary() {
   return window['go']['main']['App']['SyncYtMusicLibrary']();
+}
+
+export function TestAIConnection(arg1) {
+  return window['go']['main']['App']['TestAIConnection'](arg1);
 }
 
 export function ToggleLike(arg1) {

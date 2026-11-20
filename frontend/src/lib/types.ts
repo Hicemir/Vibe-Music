@@ -13,6 +13,8 @@ export interface Track {
   format: string
   bitrate: number
   lastPlayed: number
+  genres: string[]
+  genreSource: string
 }
 
 export interface Playlist {
@@ -49,6 +51,86 @@ export interface QueueEntry {
   tid: string
 }
 
+export interface AISettings {
+  enabled: boolean
+  autoOnNew: boolean
+  provider: string
+  baseUrl: string
+  apiKey: string
+  model: string
+  localModelId: string
+  localCustomGguf: string
+  localGpu: boolean
+  allowCustomGenres: boolean
+  webSearch: boolean
+  geminiGrounding: boolean
+}
+
+export interface AIProviderPreset {
+  id: string
+  name: string
+  kind: 'local' | 'openai' | 'gemini' | 'anthropic' | string
+  local: boolean
+  needsKey: boolean
+  defaultBaseUrl: string
+  defaultModel: string
+  note: string
+}
+
+export interface LocalAIModel {
+  id: string
+  name: string
+  sizeMb: number
+  minRam: string
+  url: string
+  filename: string
+  note: string
+}
+
+export interface LocalAIStatus {
+  runtimeReady: boolean
+  runtimeVersion: string
+  runtimeVariant: string
+  vulkanAvail: boolean
+  installedModels: string[]
+  diskUsageBytes: number
+  state: 'idle' | 'downloading' | 'extracting' | 'starting' | 'running' | 'error' | string
+  phase: string
+  percent: number
+  downloadedBytes: number
+  totalBytes: number
+  message: string
+  error: string
+}
+
+export interface AITestResult {
+  ok: boolean
+  message: string
+  latencyMs: number
+}
+
+export interface GenreStatus {
+  running: boolean
+  mode: string
+  phase: string
+  done: number
+  total: number
+  identified: number
+  aiIdentified: number
+  unidentified: number
+  unchecked: number
+  pendingAI: number
+  message: string
+  error: string
+}
+
+export interface GenreTargets {
+  missing: number
+  allAuto: number
+  pendingAI: number
+  total: number
+}
+
 export interface Settings {
   musicDirs: string[]
   downloadDir: string
@@ -67,6 +149,7 @@ export interface Settings {
   quickPicksRows: string
   cookieBrowser: string
   browserBackground: boolean
+  ai: AISettings
 }
 
 export interface DiscoverItem {
@@ -133,7 +216,7 @@ export interface Lyrics {
 
 export type RouteName =
   | 'home' | 'search' | 'playlists' | 'playlist' | 'liked' | 'recent' | 'mostplayed' | 'allsongs'
-  | 'albums' | 'album' | 'artists' | 'artist' | 'artistradio' | 'downloads' | 'settings'
+  | 'albums' | 'album' | 'artists' | 'artist' | 'artistradio' | 'quickpick' | 'downloads' | 'settings'
 
 export interface Route {
   name: RouteName

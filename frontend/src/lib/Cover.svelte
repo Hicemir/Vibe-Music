@@ -7,21 +7,25 @@
     ids = null,
     icon = 'note',
     class: cls = '',
-  }: { id?: string; ids?: string[] | null; icon?: string; class?: string } = $props()
-  let failed = $state(false)
+    size = 0,
+  }: { id?: string; ids?: string[] | null; icon?: string; class?: string; size?: number } = $props()
+  let failedId = $state('')
+  const failed = $derived(!!id && failedId === id)
+  const cellSize = $derived(size ? Math.min(size, 300) : 300)
+  const singleDim = $derived(size || 600)
 </script>
 
 <div class="cover {cls}">
   {#if ids && ids.length >= 4}
     <div class="mosaic">
       {#each ids.slice(0, 4) as i}
-        <div class="cell"><img src={coverUrl(i)} alt="" loading="lazy" /></div>
+        <div class="cell"><img src={coverUrl(i, cellSize)} width={cellSize} height={cellSize} alt="" loading="lazy" decoding="async" /></div>
       {/each}
     </div>
   {:else if ids && ids.length > 0}
-    <img src={coverUrl(ids[0])} alt="" loading="lazy" />
+    <img src={coverUrl(ids[0], size || undefined)} width={singleDim} height={singleDim} alt="" loading="lazy" decoding="async" />
   {:else if id && !failed}
-    <img src={coverUrl(id)} alt="" loading="lazy" onerror={() => (failed = true)} />
+    <img src={coverUrl(id, size || undefined)} width={singleDim} height={singleDim} alt="" loading="lazy" decoding="async" onerror={() => (failedId = id)} />
   {:else}
     <Icon name={icon} size={28} />
   {/if}

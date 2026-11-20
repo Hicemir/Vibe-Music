@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -19,6 +18,7 @@ import android.os.StatFs
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.text.Editable
+import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -51,14 +51,19 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.vibemusic.nativeapp.data.AiGenreSettings
 import com.vibemusic.nativeapp.data.CanonicalKey
 import com.vibemusic.nativeapp.data.Playlist
 import com.vibemusic.nativeapp.data.RecommendationEngine
 import com.vibemusic.nativeapp.data.Track
 import com.vibemusic.nativeapp.data.YtCollectionType
+import com.vibemusic.nativeapp.genre.AiGenreClient
+import com.vibemusic.nativeapp.genre.GenreStatus
+import com.vibemusic.nativeapp.genre.GenreTaxonomy
 import com.vibemusic.nativeapp.player.BiquadEqAudioProcessor
 import com.vibemusic.nativeapp.player.PlaybackService
 import com.vibemusic.nativeapp.ui.BottomActionSheet
+import com.vibemusic.nativeapp.ui.CoverLoader
 import com.vibemusic.nativeapp.ui.DownloadJobAdapter
 import com.vibemusic.nativeapp.ui.LyricsAdapter
 import com.vibemusic.nativeapp.ui.OnlineDiscoverAdapter
@@ -68,9 +73,13 @@ import com.vibemusic.nativeapp.ui.PullToRefreshLayout
 import com.vibemusic.nativeapp.ui.QuickPicksAdapter
 import com.vibemusic.nativeapp.ui.SectionReorderAdapter
 import com.vibemusic.nativeapp.ui.TrackAdapter
+import com.vibemusic.nativeapp.ui.WrapLayout
 import com.vibemusic.nativeapp.ui.YtMusicCollectionAdapter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlin.math.ceil
+import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
@@ -84,6 +93,7 @@ class MainActivity : AppCompatActivity() {
     private val playerManager by lazy { app.playerManager }
     private val scanner by lazy { app.scanner }
     private val ytdlpManager by lazy { app.ytdlpManager }
+    private val genreDetector by lazy { app.genreDetector }
 
     // Root views
     private lateinit var contentFrame: FrameLayout
@@ -98,6 +108,9 @@ class MainActivity : AppCompatActivity() {
     private var refreshLibraryData: (() -> Unit)? = null
     private var refreshDownloadsData: (() -> Unit)? = null
     private var refreshSettingsData: (() -> Unit)? = null
+    private var refreshGenreSettingsData: ((GenreStatus) -> Unit)? = null
+    private var genreSummaryTextView: TextView? = null
+    private var genreModeTextView: TextView? = null
 
     // Mini Player views
     private lateinit var miniCover: ImageView
@@ -130,6 +143,7 @@ class MainActivity : AppCompatActivity() {
 
     private var isCollectionDetailOpen = false
     private var isHiddenSongsOpen = false
+    private var isGenreSettingsOpen = false
     private var currentRadioMode = "all"
     private var currentTab = "home"
     private var isUserTrackingSeekbar = false
@@ -222,10 +236,7 @@ class MainActivity : AppCompatActivity() {
             onPeekAdjacentTrack = { dir ->
                 val adj = if (dir > 0) playerManager.peekNextTrack() else playerManager.peekPreviousTrack()
                 if (adj != null) {
-                    val coverFile = store.getCoverFile(adj.id)
-                    val bmp = if (coverFile.exists() && coverFile.length() > 0) {
-                        BitmapFactory.decodeFile(coverFile.absolutePath)
-                    } else null
+                    val bmp = CoverLoader.getCachedOrDecodeSync(store, adj.id, 192)
                     Triple(adj.displayTitle, adj.displayArtist, bmp)
                 } else null
             },
@@ -240,11 +251,27 @@ class MainActivity : AppCompatActivity() {
         run {
             val initialTrack = playerManager.currentTrack.value
             if (initialTrack != null) {
-                val coverFile = store.getCoverFile(initialTrack.id)
-                val bmp = if (coverFile.exists() && coverFile.length() > 0) {
-                    BitmapFactory.decodeFile(coverFile.absolutePath)
-                } else null
-                playerSheetController.updateTrackInfo(initialTrack.displayTitle, initialTrack.displayArtist, bmp)
+                playerSheetController.updateTrackInfo(initialTrack.displayTitle, initialTrack.displayArtist, null)
+                lifecycleScope.launch {
+                    val bmp = CoverLoader.loadBitmap(store, initialTrack.id, 600)
+                    val palette = bmp?.let {
+                        withContext(Dispatchers.IO) {
+                            PlayerSheetController.computeDarkPalette(
+                                it,
+                                playerSheetController.defaultBgColor,
+                                playerSheetController.defaultSurfaceColor
+                            )
+                        }
+                    }
+                    if (playerManager.currentTrack.value?.id == initialTrack.id && bmp != null) {
+                        playerSheetController.updateTrackInfo(
+                            initialTrack.displayTitle,
+                            initialTrack.displayArtist,
+                            bmp,
+                            palette
+                        )
+                    }
+                }
             } else {
                 playerSheetController.updateTrackInfo("Play something", "Tap a track or radio to begin", null)
             }
@@ -253,8 +280,31 @@ class MainActivity : AppCompatActivity() {
 
         // Refresh library in-place when background downloads or YT Music imports complete
         ytdlpManager.onDownloadComplete = {
+            genreDetector.kickAuto()
             runOnUiThread {
                 refreshLibraryData?.invoke()
+            }
+        }
+
+        genreDetector.onGenresUpdated = {
+            runOnUiThread {
+                val st = genreDetector.status.value
+                updateGenreSettingsSummaryViews(st)
+                refreshGenreSettingsData?.invoke(st)
+                if (!st.running) {
+                    if (currentTab == "home") {
+                        tabViews["home"]?.let { populateHomeView(it, refreshOnlineDiscover = false) }
+                    } else if (currentTab == "library") {
+                        refreshLibraryData?.invoke()
+                    }
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            genreDetector.status.collectLatest { st ->
+                updateGenreSettingsSummaryViews(st)
+                refreshGenreSettingsData?.invoke(st)
             }
         }
 
@@ -296,6 +346,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (isHiddenSongsOpen) {
                     closeHiddenSongsScreen()
+                    return
+                }
+                if (isGenreSettingsOpen) {
+                    closeGenreSettingsScreen()
                     return
                 }
                 if (isCollectionDetailOpen) {
@@ -393,6 +447,7 @@ class MainActivity : AppCompatActivity() {
         }
         val existingDirs = allScanDirs.filter { it.isNotBlank() && File(it).exists() }.distinct()
         scanner.scan(existingDirs)
+        genreDetector.kickAuto()
     }
 
     private fun triggerLibraryScan() {
@@ -420,6 +475,8 @@ class MainActivity : AppCompatActivity() {
     private fun closeOverlays() {
         isCollectionDetailOpen = false
         isHiddenSongsOpen = false
+        isGenreSettingsOpen = false
+        refreshGenreSettingsData = null
         overlayContainer.removeAllViews()
         overlayContainer.visibility = View.GONE
     }
@@ -430,7 +487,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val isSameTab = (tab == currentTab)
-        val hadOverlay = isCollectionDetailOpen || isHiddenSongsOpen
+        val hadOverlay = isCollectionDetailOpen || isHiddenSongsOpen || isGenreSettingsOpen
         if (hadOverlay) {
             closeOverlays()
         }
@@ -585,17 +642,11 @@ class MainActivity : AppCompatActivity() {
                 if (track != null) {
                     miniTitle.text = track.displayTitle
                     miniArtist.text = track.displayArtist
-
-                    val coverFile = store.getCoverFile(track.id)
-                    if (coverFile.exists() && coverFile.length() > 0) {
-                        val bmp = BitmapFactory.decodeFile(coverFile.absolutePath)
-                        miniCover.setImageBitmap(bmp)
-                    } else {
-                        miniCover.setImageResource(R.drawable.ic_music_note)
-                    }
+                    CoverLoader.loadInto(miniCover, store, track.id, 192, R.drawable.ic_music_note)
                 } else {
                     miniTitle.text = "Play something"
                     miniArtist.text = "Tap a track or radio to begin"
+                    miniCover.tag = null
                     miniCover.setImageResource(R.drawable.ic_music_note)
                     if (::playerSheetController.isInitialized) {
                         playerSheetController.updateTrackInfo("Play something", "Tap a track or radio to begin", null)
@@ -847,15 +898,12 @@ class MainActivity : AppCompatActivity() {
                 npQueueNowPlayingContainer?.visibility = View.VISIBLE
                 npQueueCurrentTitle?.text = curTrack.displayTitle
                 npQueueCurrentArtist?.text = curTrack.displayArtist
-                val coverFile = store.getCoverFile(curTrack.id)
-                if (coverFile.exists() && coverFile.length() > 0) {
-                    val bmp = BitmapFactory.decodeFile(coverFile.absolutePath)
-                    npQueueCurrentCover?.setImageBitmap(bmp)
-                } else {
-                    npQueueCurrentCover?.setImageResource(R.drawable.ic_music_note)
+                npQueueCurrentCover?.let {
+                    CoverLoader.loadInto(it, store, curTrack.id, 192, R.drawable.ic_music_note)
                 }
                 npQueueEqualizer?.setPlaying(playerManager.isPlaying.value)
             } else {
+                npQueueCurrentCover?.tag = null
                 npQueueNowPlayingContainer?.visibility = View.GONE
             }
 
@@ -915,14 +963,30 @@ class MainActivity : AppCompatActivity() {
                     npArtist.text = track.displayArtist
                     updateLikeIcon(track.liked)
 
-                    val coverFile = store.getCoverFile(track.id)
-                    val bmp = if (coverFile.exists() && coverFile.length() > 0) {
-                        BitmapFactory.decodeFile(coverFile.absolutePath)
+                    val defaultBg = if (::playerSheetController.isInitialized) {
+                        playerSheetController.defaultBgColor
                     } else {
-                        null
+                        ContextCompat.getColor(this@MainActivity, R.color.bg_primary)
                     }
+                    val defaultSurface = if (::playerSheetController.isInitialized) {
+                        playerSheetController.defaultSurfaceColor
+                    } else {
+                        ContextCompat.getColor(this@MainActivity, R.color.bg_surface_elevated)
+                    }
+
+                    val (bmp, palette, lyrics) = withContext(Dispatchers.IO) {
+                        val loadedBmp = CoverLoader.loadBitmap(store, track.id, 600)
+                        val computedPalette = loadedBmp?.let {
+                            PlayerSheetController.computeDarkPalette(it, defaultBg, defaultSurface)
+                        }
+                        val loadedLyrics = com.vibemusic.nativeapp.scanner.LyricsHelper.getLyrics(track)
+                        playerManager.peekNextTrack()?.let { CoverLoader.preload(store, it.id, 192) }
+                        playerManager.peekPreviousTrack()?.let { CoverLoader.preload(store, it.id, 192) }
+                        Triple(loadedBmp, computedPalette, loadedLyrics)
+                    }
+
                     if (::playerSheetController.isInitialized) {
-                        playerSheetController.updateTrackInfo(track.displayTitle, track.displayArtist, bmp)
+                        playerSheetController.updateTrackInfo(track.displayTitle, track.displayArtist, bmp, palette)
                     } else if (bmp != null) {
                         npCover.setImageBitmap(bmp)
                     } else {
@@ -930,7 +994,6 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     // Load lyrics
-                    val lyrics = com.vibemusic.nativeapp.scanner.LyricsHelper.getLyrics(track)
                     if (lyrics.lines.isNotEmpty()) {
                         lyricsAdapter.submitLines(lyrics.lines)
                         npLyricsEmpty.visibility = View.GONE
@@ -1207,6 +1270,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private data class HomePreparedData(
+        val allTracks: List<Track>,
+        val playlists: List<Playlist>,
+        val plMap: Map<Long, List<String>>,
+        val quickPicksTracks: List<Track>,
+        val topTracks: List<Track>,
+        val recentTracks: List<Track>,
+        val artists: List<String>,
+        val artistCoverMap: Map<String, String>
+    )
+
+    private class ArtistCardViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        val coverImg: ImageView = view.findViewById(R.id.artist_cover)
+        val nameTxt: TextView = view.findViewById(R.id.artist_name)
+    }
+
     private suspend fun populateHomeViewAsync(view: View, refreshOnlineDiscover: Boolean = true) {
         val settings = withContext(Dispatchers.IO) { store.loadSettings() }
         withContext(Dispatchers.Main) {
@@ -1221,10 +1300,45 @@ class MainActivity : AppCompatActivity() {
             val r7 = store.getRecentPlayCounts(now - 7 * 86400L)
             val r30 = store.getRecentPlayCounts(now - 30 * 86400L)
             val ranked = RecommendationEngine.rankLibraryArtistsByAffinity(all, r7, r30, map)
-            Pair(Triple(all, pls, map), ranked)
+            val quickPicks = RecommendationEngine.buildQuickPicks(all, 0, map)
+            val topTracks = all.filter { it.playCount > 0 }.sortedByDescending { it.playCount }.take(10)
+            val recentTracks = all.sortedByDescending { it.addedAt }.take(10)
+            val artists = if (ranked.isNotEmpty()) {
+                ranked.map { it.artist }
+            } else {
+                all.flatMap { CanonicalKey.splitArtists(it.artist) }
+                    .distinct()
+                    .filter { it.isNotBlank() && !it.equals("Unknown Artist", ignoreCase = true) }
+            }
+            val artistCoverMap = HashMap<String, String>(artists.size)
+            val artistFallbackMap = HashMap<String, String>(artists.size)
+            for (t in all) {
+                for (a in CanonicalKey.splitArtists(t.artist)) {
+                    if (a.isBlank() || a.equals("Unknown Artist", ignoreCase = true)) continue
+                    val normKey = CanonicalKey.norm(a)
+                    if (normKey.isEmpty()) continue
+                    if (!artistFallbackMap.containsKey(normKey)) {
+                        artistFallbackMap[normKey] = t.id
+                    }
+                    if (t.hasCover && !artistCoverMap.containsKey(normKey)) {
+                        artistCoverMap[normKey] = t.id
+                    }
+                }
+            }
+            for ((k, tid) in artistFallbackMap) {
+                if (!artistCoverMap.containsKey(k)) {
+                    artistCoverMap[k] = tid
+                }
+            }
+            HomePreparedData(all, pls, map, quickPicks, topTracks, recentTracks, artists, artistCoverMap)
         }
-        val (allTracks, playlists, plMap) = homeData.first
-        val rankedArtists = homeData.second
+        val allTracks = homeData.allTracks
+        val playlists = homeData.playlists
+        val plMap = homeData.plMap
+        val quickPicksTracks = homeData.quickPicksTracks
+        val topTracks = homeData.topTracks
+        val recentTracks = homeData.recentTracks
+        val artists = homeData.artists
 
         withContext(Dispatchers.Main) {
             val homeScroll = view.findViewById<androidx.core.widget.NestedScrollView>(R.id.home_scroll)
@@ -1281,7 +1395,6 @@ class MainActivity : AppCompatActivity() {
                 }
             )
             qpRecycler.adapter = qpAdapter
-            val quickPicksTracks = RecommendationEngine.buildQuickPicks(allTracks)
             qpAdapter.submitTracks(quickPicksTracks)
 
             // Spawn next column seamlessly as user scrolls right
@@ -1314,59 +1427,36 @@ class MainActivity : AppCompatActivity() {
                 playerManager.playTracks(listOf(track), 0)
             }, { track, anchor -> showTrackMenu(track, anchor) })
             topRecycler.adapter = topAdapter
-            topAdapter.submitList(allTracks.filter { it.playCount > 0 }.sortedByDescending { it.playCount }.take(10))
+            topAdapter.submitList(topTracks)
 
             // 4. Artist Radios (with circular cover art from artist's music)
             val artistRecycler = view.findViewById<RecyclerView>(R.id.recycler_artist_radios)
             if (artistRecycler.layoutManager == null) {
                 artistRecycler.layoutManager = LinearLayoutManager(this@MainActivity, LinearLayoutManager.HORIZONTAL, false)
             }
-            val artists = if (rankedArtists.isNotEmpty()) {
-                rankedArtists.map { it.artist }
-            } else {
-                allTracks.flatMap { CanonicalKey.splitArtists(it.artist) }
-                    .distinct()
-                    .filter { it.isNotBlank() && !it.equals("Unknown Artist", ignoreCase = true) }
-            }
-            val artistAdapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
-                override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            val artistAdapter = object : RecyclerView.Adapter<ArtistCardViewHolder>() {
+                override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ArtistCardViewHolder {
                     val card = layoutInflater.inflate(R.layout.item_artist_card, parent, false)
-                    return object : RecyclerView.ViewHolder(card) {}
+                    return ArtistCardViewHolder(card)
                 }
 
-                override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+                override fun onBindViewHolder(holder: ArtistCardViewHolder, position: Int) {
                     val art = artists[position]
-                    val coverImg = holder.itemView.findViewById<ImageView>(R.id.artist_cover)
-                    val nameTxt = holder.itemView.findViewById<TextView>(R.id.artist_name)
-                    nameTxt.text = art
+                    holder.nameTxt.text = art
 
-                    val artTracks = allTracks.filter { CanonicalKey.hasArtist(it.artist, art) }
-                    val trackWithCover = artTracks.firstOrNull { store.getCoverFile(it.id).exists() } ?: artTracks.firstOrNull()
-
-                    if (trackWithCover != null) {
-                        val cFile = store.getCoverFile(trackWithCover.id)
-                        if (cFile.exists() && cFile.length() > 0) {
-                            try {
-                                val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                                val bmp = BitmapFactory.decodeFile(cFile.absolutePath, opts)
-                                coverImg.setImageBitmap(bmp)
-                            } catch (_: Exception) {
-                                coverImg.setImageResource(R.drawable.ic_music_note)
-                            }
-                        } else {
-                            coverImg.setImageResource(R.drawable.ic_music_note)
-                        }
-                    } else {
-                        coverImg.setImageResource(R.drawable.ic_music_note)
-                    }
+                    val coverTrackId = homeData.artistCoverMap[CanonicalKey.norm(art)]
+                    CoverLoader.loadInto(holder.coverImg, store, coverTrackId, 256, R.drawable.ic_music_note)
 
                     holder.itemView.setOnClickListener {
                         val artistOnlyTracks = allTracks.filter {
                             CanonicalKey.hasArtist(it.artist, art) || it.displayArtist.equals(art, ignoreCase = true)
                         }
                         if (artistOnlyTracks.isNotEmpty()) {
+                            val radioSeed = artistOnlyTracks.maxByOrNull { it.playCount * 10 + if (it.liked) 25 else 0 }
+                                ?: artistOnlyTracks.first()
+                            val radioMix = RecommendationEngine.buildRadioMix(radioSeed, allTracks, plMap, "artist", 25)
                             playerManager.playTracks(
-                                artistOnlyTracks,
+                                radioMix,
                                 startIndex = 0,
                                 collectionKey = "collection:$art Radio"
                             )
@@ -1480,7 +1570,7 @@ class MainActivity : AppCompatActivity() {
                 playerManager.playTracks(listOf(track), 0)
             }, { track, anchor -> showTrackMenu(track, anchor) })
             recentRecycler.adapter = recentAdapter
-            recentAdapter.submitList(allTracks.sortedByDescending { it.addedAt }.take(10))
+            recentAdapter.submitList(recentTracks)
         }
     }
 
@@ -1510,6 +1600,10 @@ class MainActivity : AppCompatActivity() {
         var filter = "all"
         var showAllDefaultTracks = false
         var currentPlaybackList: List<Track> = emptyList()
+        var searchJob: Job? = null
+        var cachedTracks: List<Track>? = null
+        var cachedPlaylists: List<Playlist>? = null
+        var cachedPlTrackMap: Map<Long, List<String>>? = null
 
         val trackAdapter = TrackAdapter(store, { track ->
             val list = currentPlaybackList.ifEmpty { listOf(track) }
@@ -1518,17 +1612,27 @@ class MainActivity : AppCompatActivity() {
         }, { track, anchor -> showTrackMenu(track, anchor) })
         recycler.adapter = trackAdapter
 
-        fun performSearch(query: String) {
-            lifecycleScope.launch(Dispatchers.IO) {
+        fun performSearch(query: String, debounceMs: Long = 0L, forceReload: Boolean = false) {
+            searchJob?.cancel()
+            searchJob = lifecycleScope.launch(Dispatchers.IO) {
+                if (debounceMs > 0L) delay(debounceMs)
+                if (forceReload || cachedTracks == null) {
+                    cachedTracks = store.getAllTracks()
+                    cachedPlaylists = store.getPlaylists()
+                    cachedPlTrackMap = store.getAllPlaylistTracks()
+                }
+                val allTracks = cachedTracks ?: emptyList()
+                val playlists = cachedPlaylists ?: emptyList()
+                val plTrackMap = cachedPlTrackMap ?: emptyMap()
+
                 val q = query.trim().lowercase()
-                val allTracks = store.getAllTracks()
                 if (q.isEmpty()) {
                     withContext(Dispatchers.Main) {
                         currentPlaybackList = allTracks
                         if (!showAllDefaultTracks && allTracks.size > 50) {
                             trackAdapter.setFooterButton("Show all (${allTracks.size} songs)") {
                                 showAllDefaultTracks = true
-                                performSearch(input.text.toString())
+                                performSearch(input.text.toString(), debounceMs = 0L)
                             }
                             trackAdapter.submitList(allTracks.take(50))
                         } else {
@@ -1538,8 +1642,10 @@ class MainActivity : AppCompatActivity() {
                     }
                 } else {
                     val matchingPlaylistTrackIds = if (filter == "all" || filter == "playlists") {
-                        val pls = store.getPlaylists().filter { it.name.lowercase().contains(q) }
-                        pls.flatMap { store.getPlaylistTrackIds(it.id) }.toSet()
+                        playlists.asSequence()
+                            .filter { it.name.lowercase().contains(q) }
+                            .flatMap { plTrackMap[it.id]?.asSequence() ?: emptySequence() }
+                            .toSet()
                     } else {
                         emptySet()
                     }
@@ -1566,14 +1672,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         refreshSearchData = {
-            performSearch(input.text.toString())
+            performSearch(input.text.toString(), debounceMs = 0L, forceReload = true)
         }
 
         input.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 clear.visibility = if (s.isNullOrEmpty()) View.GONE else View.VISIBLE
-                performSearch(s?.toString() ?: "")
+                performSearch(s?.toString() ?: "", debounceMs = 120L)
             }
             override fun afterTextChanged(s: Editable?) {}
         })
@@ -1599,11 +1705,11 @@ class MainActivity : AppCompatActivity() {
                     c.setBackgroundResource(if (active) R.drawable.bg_pill_active else R.drawable.bg_pill)
                     c.setTextColor(ContextCompat.getColor(this, if (active) R.color.black else R.color.text_primary))
                 }
-                performSearch(input.text.toString())
+                performSearch(input.text.toString(), debounceMs = 0L)
             }
         }
 
-        performSearch("")
+        performSearch("", debounceMs = 0L, forceReload = true)
         return view
     }
 
@@ -2108,8 +2214,7 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch(Dispatchers.IO) {
             val tracks = if (playlistId > 0) {
-                val tids = store.getPlaylistTrackIds(playlistId)
-                tids.mapNotNull { store.getTrackById(it) }
+                store.getPlaylistTracks(playlistId)
             } else {
                 initialTracks
             }
@@ -2117,17 +2222,17 @@ class MainActivity : AppCompatActivity() {
 
             val totalDur = tracks.sumOf { it.duration }
             val min = (totalDur / 60).toInt()
+            val loadedCover = if (tracks.isNotEmpty()) {
+                CoverLoader.loadBitmap(store, tracks[0].id, 600)
+            } else null
 
             withContext(Dispatchers.Main) {
                 subView.text = "${tracks.size} tracks • $min mins"
                 applyFilterAndSort()
 
-                if (tracks.isNotEmpty()) {
-                    val f = store.getCoverFile(tracks[0].id)
-                    if (f.exists() && f.length() > 0) {
-                        coverBitmap = BitmapFactory.decodeFile(f.absolutePath)
-                        coverView.setImageBitmap(coverBitmap)
-                    }
+                if (loadedCover != null) {
+                    coverBitmap = loadedCover
+                    coverView.setImageBitmap(coverBitmap)
                 }
 
                 btnPlay?.setOnClickListener {
@@ -2605,10 +2710,20 @@ class MainActivity : AppCompatActivity() {
 
         recycler.layoutManager = LinearLayoutManager(this)
         (recycler.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
-        val jobAdapter = DownloadJobAdapter { job ->
-            ytdlpManager.cancelJob(job.id)
-            Toast.makeText(this@MainActivity, "Cancelled download", Toast.LENGTH_SHORT).show()
-        }
+        val jobAdapter = DownloadJobAdapter(
+            onCancelClick = { job ->
+                if (job.status == "downloading" || job.status == "pending") {
+                    ytdlpManager.cancelJob(job.id)
+                    Toast.makeText(this@MainActivity, "Cancelled download", Toast.LENGTH_SHORT).show()
+                } else {
+                    ytdlpManager.removeJob(job.id)
+                }
+            },
+            onRetryClick = { job ->
+                ytdlpManager.retryJob(job.id)
+                Toast.makeText(this@MainActivity, "Retrying download", Toast.LENGTH_SHORT).show()
+            }
+        )
         recycler.adapter = jobAdapter
 
         refreshDownloadsData = {
@@ -2887,6 +3002,17 @@ class MainActivity : AppCompatActivity() {
         val storageDetailText = view.findViewById<TextView>(R.id.settings_storage_detail_text)
         val storageBar = view.findViewById<ProgressBar>(R.id.settings_storage_bar)
         val eqPresetLabel = view.findViewById<TextView>(R.id.settings_eq_preset_label)
+        val versionText = view.findViewById<TextView>(R.id.settings_version_text)
+        genreSummaryTextView = view.findViewById(R.id.settings_genre_summary_text)
+        genreModeTextView = view.findViewById(R.id.settings_genre_mode_text)
+
+        val pkgVersion = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "0.6.2"
+        } catch (_: Exception) {
+            "0.6.2"
+        }
+        versionText?.text = "v$pkgVersion"
+        updateGenreSettingsSummaryViews(genreDetector.refreshStatus())
 
         fun refreshDirsList() {
             containerDirs.removeAllViews()
@@ -3003,6 +3129,7 @@ class MainActivity : AppCompatActivity() {
         refreshSettingsData = {
             refreshDirsList()
             refreshHiddenCountAndLabels()
+            updateGenreSettingsSummaryViews(genreDetector.refreshStatus())
         }
 
         refreshDirsList()
@@ -3061,6 +3188,10 @@ class MainActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(this, "All Files Access is only needed on Android 11+", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        view.findViewById<View>(R.id.settings_btn_genre_detection)?.setOnClickListener {
+            showGenreSettingsScreen()
         }
 
         view.findViewById<View>(R.id.settings_btn_home_sections).setOnClickListener {
@@ -3129,6 +3260,574 @@ class MainActivity : AppCompatActivity() {
         overlayContainer.removeAllViews()
         overlayContainer.visibility = View.GONE
         refreshSettingsData?.invoke()
+    }
+
+    private fun updateGenreSettingsSummaryViews(st: GenreStatus) {
+        val summaryView = genreSummaryTextView ?: return
+        val modeView = genreModeTextView
+        summaryView.text = if (st.running) {
+            val pct = if (st.total > 0) " (${(st.done * 100 / st.total).coerceIn(0, 100)}%)" else ""
+            "${st.phase.ifEmpty { "Working" }}$pct"
+        } else {
+            "${st.identified} / ${st.totalTracks} songs have genres" +
+                if (st.aiIdentified > 0) " • ${st.aiIdentified} AI-tagged" else ""
+        }
+        val ai = store.loadSettings().ai
+        val preset = AiGenreClient.findPreset(ai.provider)
+        val modelLabel = ai.model.ifBlank { preset?.defaultModel.orEmpty() }
+        modeView?.text = when {
+            ai.enabled && preset != null -> "AI: ${preset.name}${if (modelLabel.isNotEmpty()) " ($modelLabel)" else ""}"
+            else -> "Standard (No AI) + Bring Your Own AI"
+        }
+    }
+
+    private fun closeGenreSettingsScreen() {
+        isGenreSettingsOpen = false
+        refreshGenreSettingsData = null
+        overlayContainer.removeAllViews()
+        overlayContainer.visibility = View.GONE
+        refreshSettingsData?.invoke()
+    }
+
+    private fun showGenreSettingsScreen() {
+        isGenreSettingsOpen = true
+        overlayContainer.removeAllViews()
+        val view = layoutInflater.inflate(R.layout.screen_genre_settings, overlayContainer, false)
+        overlayContainer.addView(view)
+        overlayContainer.visibility = View.VISIBLE
+
+        val statsText = view.findViewById<TextView>(R.id.genre_stats_text)
+        val progressRow = view.findViewById<View>(R.id.genre_progress_row)
+        val progressText = view.findViewById<TextView>(R.id.genre_progress_text)
+        val progressBar = view.findViewById<ProgressBar>(R.id.genre_progress_bar)
+        val btnStop = view.findViewById<TextView>(R.id.genre_btn_stop)
+        val statusMsg = view.findViewById<TextView>(R.id.genre_status_msg)
+
+        val btnClassicMissing = view.findViewById<TextView>(R.id.genre_btn_classic_missing)
+        val btnClassicAll = view.findViewById<TextView>(R.id.genre_btn_classic_all)
+
+        val providerPicker = view.findViewById<View>(R.id.genre_provider_picker)
+        val providerNameTxt = view.findViewById<TextView>(R.id.genre_provider_name)
+        val providerBadgeTxt = view.findViewById<TextView>(R.id.genre_provider_badge)
+        val providerNoteTxt = view.findViewById<TextView>(R.id.genre_provider_note)
+
+        val overrideUrlRow = view.findViewById<View>(R.id.genre_override_url_row)
+        val defaultEndpointTxt = view.findViewById<TextView>(R.id.genre_default_endpoint_text)
+        val switchOverrideUrl = view.findViewById<SwitchCompat>(R.id.genre_switch_override_url)
+        val urlGroup = view.findViewById<View>(R.id.genre_url_group)
+        val inputBaseUrl = view.findViewById<EditText>(R.id.genre_input_base_url)
+
+        val keyOptionalHint = view.findViewById<View>(R.id.genre_key_optional_hint)
+        val inputApiKey = view.findViewById<EditText>(R.id.genre_input_api_key)
+        val btnToggleKey = view.findViewById<TextView>(R.id.genre_btn_toggle_key)
+        val inputModel = view.findViewById<EditText>(R.id.genre_input_model)
+
+        val btnTest = view.findViewById<TextView>(R.id.genre_btn_test)
+        val testResultTxt = view.findViewById<TextView>(R.id.genre_test_result)
+
+        val switchWebSearch = view.findViewById<SwitchCompat>(R.id.genre_switch_web_search)
+        val groundingRow = view.findViewById<View>(R.id.genre_gemini_grounding_row)
+        val switchGrounding = view.findViewById<SwitchCompat>(R.id.genre_switch_gemini_grounding)
+        val switchAutoAi = view.findViewById<SwitchCompat>(R.id.genre_switch_auto_ai)
+        val switchCustomGenres = view.findViewById<SwitchCompat>(R.id.genre_switch_custom_genres)
+
+        val resumeRow = view.findViewById<View>(R.id.genre_resume_row)
+        val btnResume = view.findViewById<TextView>(R.id.genre_btn_ai_resume)
+        val btnClearPending = view.findViewById<TextView>(R.id.genre_btn_clear_pending)
+        val btnAiMissing = view.findViewById<TextView>(R.id.genre_btn_ai_missing)
+        val btnAiAll = view.findViewById<TextView>(R.id.genre_btn_ai_all)
+
+        var currentAi = store.loadSettings().ai
+        var showKey = false
+        var overrideUrl = currentAi.baseUrl.isNotBlank()
+        var testing = false
+        var suppressWatchers = false
+        var saveJob: Job? = null
+
+        fun applyProviderLayout(ai: AiGenreSettings) {
+            val preset = AiGenreClient.findPreset(ai.provider) ?: AiGenreClient.findPreset("gemini")!!
+            providerNameTxt.text = preset.name
+            providerBadgeTxt.text = if (preset.selfHosted) "Self-hosted Server" else "Cloud API"
+            if (preset.note.isNotEmpty()) {
+                providerNoteTxt.text = preset.note
+                providerNoteTxt.visibility = View.VISIBLE
+            } else {
+                providerNoteTxt.visibility = View.GONE
+            }
+
+            defaultEndpointTxt.text = preset.defaultBaseUrl
+            inputBaseUrl.hint = preset.defaultBaseUrl.ifEmpty { "https://your-server/v1" }
+            inputModel.hint = preset.defaultModel.ifEmpty { "model-name" }
+            keyOptionalHint.visibility = if (preset.selfHosted) View.VISIBLE else View.GONE
+            inputApiKey.hint = if (preset.needsKey) "Paste your API key" else "Optional API key"
+
+            if (preset.selfHosted) {
+                overrideUrlRow.visibility = View.GONE
+                urlGroup.visibility = View.VISIBLE
+            } else {
+                overrideUrlRow.visibility = View.VISIBLE
+                val showCustom = overrideUrl || ai.baseUrl.isNotBlank()
+                urlGroup.visibility = if (showCustom) View.VISIBLE else View.GONE
+                suppressWatchers = true
+                switchOverrideUrl.isChecked = showCustom
+                suppressWatchers = false
+            }
+
+            groundingRow.visibility = if (preset.id == "gemini") View.VISIBLE else View.GONE
+        }
+
+        fun loadFieldsFromSettings(ai: AiGenreSettings) {
+            suppressWatchers = true
+            inputBaseUrl.setText(ai.baseUrl)
+            inputApiKey.setText(ai.apiKey)
+            inputModel.setText(ai.model)
+            switchWebSearch.isChecked = ai.webSearch
+            switchGrounding.isChecked = ai.geminiGrounding
+            switchAutoAi.isChecked = ai.autoOnNew
+            switchCustomGenres.isChecked = ai.allowCustomGenres
+            suppressWatchers = false
+            applyProviderLayout(ai)
+        }
+
+        fun persistAi(updated: AiGenreSettings) {
+            currentAi = updated
+            val cur = store.loadSettings()
+            store.saveSettings(cur.copy(ai = updated))
+        }
+
+        fun flushTextInputs(): AiGenreSettings {
+            saveJob?.cancel()
+            val updated = currentAi.copy(
+                baseUrl = inputBaseUrl.text.toString().trim(),
+                apiKey = inputApiKey.text.toString().trim(),
+                model = inputModel.text.toString().trim()
+            )
+            persistAi(updated)
+            return updated
+        }
+
+        fun scheduleTextSave() {
+            if (suppressWatchers) return
+            testResultTxt.visibility = View.GONE
+            saveJob?.cancel()
+            saveJob = lifecycleScope.launch {
+                delay(250)
+                flushTextInputs()
+            }
+        }
+
+        fun renderStatus(st: GenreStatus) {
+            statsText.text = buildString {
+                append("${st.identified} / ${st.totalTracks} songs have genres")
+                if (st.aiIdentified > 0) append(" • ${st.aiIdentified} AI")
+                if (st.unidentified > 0) append(" • ${st.unidentified} unidentified")
+            }
+
+            if (st.running) {
+                progressRow.visibility = View.VISIBLE
+                val pct = if (st.total > 0) ((st.done * 100) / st.total).coerceIn(0, 100) else 30
+                progressText.text = if (st.total > 0) {
+                    "${st.phase.ifEmpty { "Working" }}... ${st.done}/${st.total} ($pct%)"
+                } else {
+                    "${st.phase.ifEmpty { "Working" }}..."
+                }
+                progressBar.progress = pct
+                statusMsg.visibility = View.GONE
+            } else {
+                progressRow.visibility = View.GONE
+                when {
+                    st.error.isNotEmpty() -> {
+                        statusMsg.text = st.error
+                        statusMsg.setTextColor(ContextCompat.getColor(this, R.color.accent_red))
+                        statusMsg.visibility = View.VISIBLE
+                    }
+                    st.message.isNotEmpty() -> {
+                        statusMsg.text = st.message
+                        statusMsg.setTextColor(ContextCompat.getColor(this, R.color.text_secondary))
+                        statusMsg.visibility = View.VISIBLE
+                    }
+                    else -> statusMsg.visibility = View.GONE
+                }
+            }
+
+            if (!st.running && st.pendingAi > 0) {
+                resumeRow.visibility = View.VISIBLE
+                btnResume.text = "Resume AI (${st.pendingAi} left)"
+            } else {
+                resumeRow.visibility = View.GONE
+            }
+
+            val busy = st.running
+            val alpha = if (busy) 0.45f else 1.0f
+            btnClassicMissing.isEnabled = !busy
+            btnClassicAll.isEnabled = !busy
+            btnAiMissing.isEnabled = !busy
+            btnAiAll.isEnabled = !busy
+            btnTest.isEnabled = !busy && !testing
+            btnClassicMissing.alpha = alpha
+            btnClassicAll.alpha = alpha
+            btnAiMissing.alpha = alpha
+            btnAiAll.alpha = alpha
+        }
+
+        refreshGenreSettingsData = { st ->
+            renderStatus(st)
+        }
+
+        view.findViewById<View>(R.id.genre_settings_back).setOnClickListener {
+            flushTextInputs()
+            closeGenreSettingsScreen()
+        }
+
+        btnStop.setOnClickListener {
+            genreDetector.cancel()
+        }
+
+        btnClassicMissing.setOnClickListener {
+            flushTextInputs()
+            genreDetector.startClassic(redetectAll = false)
+        }
+
+        btnClassicAll.setOnClickListener {
+            flushTextInputs()
+            AlertDialog.Builder(this)
+                .setTitle("Re-detect all genres?")
+                .setMessage("Discards automatically detected genres and runs standard detection (file tags, MusicBrainz + Deezer, hints) again without AI. Hand-set genres are kept.")
+                .setPositiveButton("Re-detect") { _, _ ->
+                    genreDetector.startClassic(redetectAll = true)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        providerPicker.setOnClickListener {
+            val allPresets = AiGenreClient.presets
+            val labels = allPresets.map { p ->
+                val tag = if (p.selfHosted) "[Self-hosted]" else "[Cloud]"
+                "$tag ${p.name}"
+            }.toTypedArray()
+            AlertDialog.Builder(this)
+                .setTitle("Choose AI Provider")
+                .setItems(labels) { _, which ->
+                    val chosen = allPresets[which]
+                    overrideUrl = false
+                    testResultTxt.visibility = View.GONE
+                    val nextAi = currentAi.copy(
+                        provider = chosen.id,
+                        baseUrl = if (chosen.selfHosted) chosen.defaultBaseUrl else "",
+                        model = chosen.defaultModel
+                    )
+                    persistAi(nextAi)
+                    loadFieldsFromSettings(nextAi)
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        switchOverrideUrl.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressWatchers) return@setOnCheckedChangeListener
+            overrideUrl = isChecked
+            if (!isChecked) {
+                suppressWatchers = true
+                inputBaseUrl.setText("")
+                suppressWatchers = false
+                persistAi(currentAi.copy(baseUrl = ""))
+            }
+            applyProviderLayout(currentAi)
+        }
+
+        btnToggleKey.setOnClickListener {
+            showKey = !showKey
+            val sel = inputApiKey.selectionEnd
+            inputApiKey.inputType = if (showKey) {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            } else {
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            }
+            if (sel >= 0) inputApiKey.setSelection(sel.coerceAtMost(inputApiKey.text.length))
+            btnToggleKey.text = if (showKey) "Hide" else "Show"
+        }
+
+        val watcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) { scheduleTextSave() }
+        }
+        inputBaseUrl.addTextChangedListener(watcher)
+        inputApiKey.addTextChangedListener(watcher)
+        inputModel.addTextChangedListener(watcher)
+
+        switchWebSearch.setOnCheckedChangeListener { _, checked ->
+            if (!suppressWatchers) persistAi(currentAi.copy(webSearch = checked))
+        }
+        switchGrounding.setOnCheckedChangeListener { _, checked ->
+            if (!suppressWatchers) persistAi(currentAi.copy(geminiGrounding = checked))
+        }
+        switchAutoAi.setOnCheckedChangeListener { _, checked ->
+            if (!suppressWatchers) {
+                persistAi(currentAi.copy(autoOnNew = checked, enabled = if (checked) true else currentAi.enabled))
+            }
+        }
+        switchCustomGenres.setOnCheckedChangeListener { _, checked ->
+            if (!suppressWatchers) persistAi(currentAi.copy(allowCustomGenres = checked))
+        }
+
+        btnTest.setOnClickListener {
+            if (testing) return@setOnClickListener
+            val cfg = flushTextInputs()
+            testing = true
+            btnTest.text = "Testing..."
+            btnTest.isEnabled = false
+            testResultTxt.visibility = View.GONE
+            lifecycleScope.launch {
+                val res = withContext(Dispatchers.IO) { AiGenreClient.testConnection(cfg) }
+                testing = false
+                btnTest.text = "Test connection"
+                renderStatus(genreDetector.status.value)
+                testResultTxt.text = res.message
+                testResultTxt.setTextColor(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        if (res.ok) R.color.accent_green else R.color.accent_red
+                    )
+                )
+                testResultTxt.visibility = View.VISIBLE
+            }
+        }
+
+        fun promptAiDetect(mode: String) {
+            if (genreDetector.status.value.running) return
+            val cfg = flushTextInputs()
+            try {
+                AiGenreClient.resolveConfig(cfg)
+            } catch (e: Exception) {
+                Toast.makeText(this, e.message ?: "Check AI settings", Toast.LENGTH_LONG).show()
+                return
+            }
+            val targets = genreDetector.getTargets()
+            val count = if (mode == "missing") targets.missing else targets.allAuto
+            if (count == 0) {
+                Toast.makeText(
+                    this,
+                    if (mode == "missing") "All songs already have genres" else "No eligible songs (all hand-set or file-tagged)",
+                    Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            val preset = AiGenreClient.findPreset(cfg.provider)
+            val batchSize = when {
+                cfg.provider == "ollama" || cfg.provider == "lmstudio" || cfg.provider == "custom" -> if (cfg.webSearch) 8 else 10
+                cfg.provider == "gemini" && cfg.geminiGrounding -> 8
+                cfg.webSearch -> 12
+                else -> 15
+            }
+            val batches = ceil(count.toDouble() / batchSize.toDouble()).toInt().coerceAtLeast(1)
+            val modelLabel = cfg.model.ifBlank { preset?.defaultModel ?: "default" }
+            val privacy = if (preset?.selfHosted == true) {
+                "Sends metadata to your self-hosted server."
+            } else {
+                "Only artist, title, and album text are sent (never audio)."
+            }
+            val note = if (mode == "all") {
+                "Hand-set genres and embedded file tags are never changed."
+            } else {
+                "Progress is saved after every batch."
+            }
+
+            AlertDialog.Builder(this)
+                .setTitle(if (mode == "missing") "AI detect $count missing song(s)?" else "AI re-detect $count song(s)?")
+                .setMessage("Provider: ${preset?.name ?: cfg.provider} ($modelLabel).\nProcesses $count song(s) in ~$batches request(s).\n$privacy $note")
+                .setPositiveButton(if (mode == "missing") "Start AI detect" else "Start AI re-detect") { _, _ ->
+                    persistAi(cfg.copy(enabled = true))
+                    val err = genreDetector.startAi(mode)
+                    if (err.isNotEmpty()) Toast.makeText(this, err, Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        btnAiMissing.setOnClickListener { promptAiDetect("missing") }
+        btnAiAll.setOnClickListener { promptAiDetect("all") }
+
+        btnResume.setOnClickListener {
+            val cfg = flushTextInputs()
+            persistAi(cfg.copy(enabled = true))
+            val err = genreDetector.startAi("resume")
+            if (err.isNotEmpty()) Toast.makeText(this, err, Toast.LENGTH_SHORT).show()
+        }
+
+        btnClearPending.setOnClickListener {
+            genreDetector.clearPendingAi()
+        }
+
+        loadFieldsFromSettings(currentAi)
+        renderStatus(genreDetector.refreshStatus())
+    }
+
+    private fun showEditGenresDialog(track: Track, forArtist: String? = null) {
+        val dialogView = layoutInflater.inflate(R.layout.dialog_edit_genres, null)
+        val titleTxt = dialogView.findViewById<TextView>(R.id.edit_genres_title)
+        val subTxt = dialogView.findViewById<TextView>(R.id.edit_genres_subtitle)
+        val selectedWrap = dialogView.findViewById<WrapLayout>(R.id.edit_genres_selected_wrap)
+        val emptySelected = dialogView.findViewById<TextView>(R.id.edit_genres_empty_selected)
+        val treeContainer = dialogView.findViewById<LinearLayout>(R.id.edit_genres_tree_container)
+        val customInput = dialogView.findViewById<EditText>(R.id.edit_genres_custom_input)
+        val btnAddCustom = dialogView.findViewById<TextView>(R.id.edit_genres_btn_add_custom)
+        val btnClear = dialogView.findViewById<TextView>(R.id.edit_genres_btn_clear)
+        val btnCancel = dialogView.findViewById<TextView>(R.id.edit_genres_btn_cancel)
+        val btnSave = dialogView.findViewById<TextView>(R.id.edit_genres_btn_save)
+
+        val selected = GenreTaxonomy.cleanUserGenres(track.genres).toMutableList()
+        if (!forArtist.isNullOrBlank()) {
+            titleTxt.text = "Genres for $forArtist"
+            subTxt.text = "Applies as hand-set genres to all songs by $forArtist."
+        } else {
+            titleTxt.text = "Edit genres"
+            subTxt.text = "${track.displayTitle} — ${track.displayArtist}"
+        }
+
+        val chipButtons = LinkedHashMap<String, TextView>()
+
+        fun styleChip(tv: TextView, active: Boolean) {
+            tv.setBackgroundResource(if (active) R.drawable.bg_pill_active else R.drawable.bg_pill)
+            tv.setTextColor(
+                ContextCompat.getColor(
+                    this,
+                    if (active) R.color.black else R.color.text_primary
+                )
+            )
+            tv.textSize = 12f
+            tv.setPadding(12.dpToPx(), 6.dpToPx(), 12.dpToPx(), 6.dpToPx())
+        }
+
+        lateinit var rebuildSelected: () -> Unit
+
+        fun toggleGenre(name: String) {
+            if (selected.contains(name)) {
+                selected.remove(name)
+            } else {
+                selected.add(name)
+                val cleaned = GenreTaxonomy.cleanUserGenres(selected)
+                selected.clear()
+                selected.addAll(cleaned)
+            }
+            rebuildSelected()
+        }
+
+        rebuildSelected = {
+            selectedWrap.removeAllViews()
+            emptySelected.visibility = if (selected.isEmpty()) View.VISIBLE else View.GONE
+            for (g in selected.toList()) {
+                val chip = TextView(this).apply {
+                    text = "$g ✕"
+                    isClickable = true
+                    isFocusable = true
+                    styleChip(this, true)
+                    setOnClickListener {
+                        selected.remove(g)
+                        rebuildSelected()
+                    }
+                }
+                selectedWrap.addView(chip)
+            }
+            for ((name, tv) in chipButtons) {
+                styleChip(tv, selected.contains(name))
+            }
+        }
+
+        for ((root, subs) in GenreTaxonomy.taxonomyGroups()) {
+            val groupBox = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(0, 6.dpToPx(), 0, 8.dpToPx())
+            }
+            val rootChip = TextView(this).apply {
+                text = root
+                isClickable = true
+                isFocusable = true
+                styleChip(this, selected.contains(root))
+                setOnClickListener { toggleGenre(root) }
+            }
+            chipButtons[root] = rootChip
+
+            val rootWrap = WrapLayout(this).apply {
+                addView(rootChip)
+            }
+            groupBox.addView(rootWrap)
+
+            if (subs.isNotEmpty()) {
+                val subWrap = WrapLayout(this).apply {
+                    setPadding(12.dpToPx(), 6.dpToPx(), 0, 0)
+                }
+                for (sub in subs) {
+                    val subChip = TextView(this).apply {
+                        text = sub
+                        isClickable = true
+                        isFocusable = true
+                        styleChip(this, selected.contains(sub))
+                        setOnClickListener { toggleGenre(sub) }
+                    }
+                    chipButtons[sub] = subChip
+                    subWrap.addView(subChip)
+                }
+                groupBox.addView(subWrap)
+            }
+            treeContainer.addView(groupBox)
+        }
+
+        rebuildSelected()
+
+        btnAddCustom.setOnClickListener {
+            val raw = customInput.text.toString().trim()
+            if (raw.isEmpty()) return@setOnClickListener
+            val mapped = GenreTaxonomy.mapTag(raw).ifEmpty { raw }
+            selected.add(mapped)
+            val cleaned = GenreTaxonomy.cleanUserGenres(selected)
+            selected.clear()
+            selected.addAll(cleaned)
+            customInput.setText("")
+            rebuildSelected()
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setView(dialogView)
+            .create()
+
+        btnCancel.setOnClickListener { dialog.dismiss() }
+        btnClear.setOnClickListener {
+            selected.clear()
+            lifecycleScope.launch(Dispatchers.IO) {
+                if (!forArtist.isNullOrBlank()) {
+                    store.setArtistUserGenres(forArtist, emptyList())
+                } else {
+                    store.setTrackUserGenres(track.id, emptyList())
+                }
+                genreDetector.refreshStatus()
+                withContext(Dispatchers.Main) {
+                    dialog.dismiss()
+                    Toast.makeText(this@MainActivity, "Cleared hand-set genres", Toast.LENGTH_SHORT).show()
+                    genreDetector.kickAuto()
+                }
+            }
+        }
+        btnSave.setOnClickListener {
+            val finalGenres = selected.toList()
+            lifecycleScope.launch(Dispatchers.IO) {
+                if (!forArtist.isNullOrBlank()) {
+                    store.setArtistUserGenres(forArtist, finalGenres)
+                } else {
+                    store.setTrackUserGenres(track.id, finalGenres)
+                }
+                genreDetector.refreshStatus()
+                withContext(Dispatchers.Main) {
+                    dialog.dismiss()
+                    Toast.makeText(this@MainActivity, "Saved genres", Toast.LENGTH_SHORT).show()
+                    if (currentTab == "home") tabViews["home"]?.let { populateHomeView(it, refreshOnlineDiscover = false) }
+                    if (currentTab == "library") refreshLibraryData?.invoke()
+                }
+            }
+        }
+
+        dialog.show()
     }
 
     private fun showHiddenSongsScreen() {
@@ -3603,11 +4302,9 @@ class MainActivity : AppCompatActivity() {
         queueIndex: Int = -1
     ) {
         lifecycleScope.launch(Dispatchers.IO) {
-            val coverFile = store.getCoverFile(track.id)
-            val coverBitmap = if (coverFile.exists() && coverFile.length() > 0) {
-                BitmapFactory.decodeFile(coverFile.absolutePath)
-            } else null
-            val isHidden = store.isTrackHidden(track.id)
+            val freshTrack = store.getTrackById(track.id) ?: track
+            val coverBitmap = CoverLoader.loadBitmap(store, freshTrack.id, 192)
+            val isHidden = store.isTrackHidden(freshTrack.id)
 
             withContext(Dispatchers.Main) {
                 val actions = mutableListOf<BottomActionSheet.ActionItem>()
@@ -3703,11 +4400,31 @@ class MainActivity : AppCompatActivity() {
                 actions += BottomActionSheet.ActionItem("Go to album", R.drawable.ic_album) {
                     lifecycleScope.launch(Dispatchers.IO) {
                         val all = store.getAllTracks()
-                        val albumName = track.album.ifBlank { "Unknown Album" }
+                        val albumName = freshTrack.album.ifBlank { "Unknown Album" }
                         val albumTracks = all.filter { it.album.equals(albumName, ignoreCase = true) }
                         withContext(Dispatchers.Main) {
                             openCollectionDetail(albumName, albumTracks, 0L, isPlaylist = false)
                         }
+                    }
+                }
+
+                val trackGenres = freshTrack.genres
+                val genreMenuLabel = if (trackGenres.isNotEmpty()) {
+                    val preview = trackGenres.take(3).joinToString(", ") +
+                        if (trackGenres.size > 3) " +${trackGenres.size - 3}" else ""
+                    "Genres: $preview"
+                } else {
+                    "Edit genres..."
+                }
+                actions += BottomActionSheet.ActionItem(genreMenuLabel, R.drawable.ic_tune) {
+                    showEditGenresDialog(freshTrack)
+                }
+
+                val primaryArt = CanonicalKey.splitArtists(freshTrack.artist)
+                    .firstOrNull { it.isNotBlank() && !it.equals("Unknown Artist", ignoreCase = true) }
+                if (primaryArt != null) {
+                    actions += BottomActionSheet.ActionItem("Set genres for $primaryArt", R.drawable.ic_artist) {
+                        showEditGenresDialog(freshTrack, forArtist = primaryArt)
                     }
                 }
 

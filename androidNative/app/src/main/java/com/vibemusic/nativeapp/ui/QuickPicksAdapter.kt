@@ -1,6 +1,5 @@
 package com.vibemusic.nativeapp.ui
 
-import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -51,54 +50,53 @@ class QuickPicksAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val tracks = allColumns[position]
-        val rowViews = listOf(holder.row0, holder.row1, holder.row2, holder.row3)
 
         for (i in 0 until 4) {
-            val rowView = rowViews[i]
+            val row = holder.rows[i]
             if (i < tracks.size) {
-                rowView.visibility = View.VISIBLE
+                row.root.visibility = View.VISIBLE
                 val track = tracks[i]
-                val coverImg = rowView.findViewById<ImageView>(R.id.row_cover)
-                val titleTxt = rowView.findViewById<TextView>(R.id.row_title)
-                val artistTxt = rowView.findViewById<TextView>(R.id.row_artist)
-                val moreBtn = rowView.findViewById<ImageView>(R.id.row_more)
 
-                titleTxt.text = track.displayTitle
+                row.titleTxt.text = track.displayTitle
                 val playsStr = if (track.playCount > 0) " • ${track.playCount} plays" else ""
-                artistTxt.text = "${track.displayArtist}$playsStr"
+                row.artistTxt.text = "${track.displayArtist}$playsStr"
 
-                val coverFile = store.getCoverFile(track.id)
-                if (coverFile.exists() && coverFile.length() > 0) {
-                    val bmp = BitmapFactory.decodeFile(coverFile.absolutePath)
-                    coverImg.setImageBitmap(bmp)
-                } else {
-                    coverImg.setImageResource(R.drawable.ic_music_note)
-                }
+                CoverLoader.loadInto(row.coverImg, store, track.id, 192, R.drawable.ic_music_note)
 
-                rowView.setOnClickListener {
+                row.root.setOnClickListener {
                     onTrackClick(track)
                 }
 
-                rowView.setOnLongClickListener {
-                    onMoreClick(track, moreBtn)
+                row.root.setOnLongClickListener {
+                    onMoreClick(track, row.moreBtn)
                     true
                 }
 
-                moreBtn.setOnClickListener { anchor ->
+                row.moreBtn.setOnClickListener { anchor ->
                     onMoreClick(track, anchor)
                 }
             } else {
-                rowView.visibility = View.GONE
+                row.coverImg.tag = null
+                row.root.visibility = View.GONE
             }
         }
     }
 
     override fun getItemCount(): Int = displayedColumns.coerceAtMost(allColumns.size)
 
+    class RowViews(val root: View) {
+        val coverImg: ImageView = root.findViewById(R.id.row_cover)
+        val titleTxt: TextView = root.findViewById(R.id.row_title)
+        val artistTxt: TextView = root.findViewById(R.id.row_artist)
+        val moreBtn: ImageView = root.findViewById(R.id.row_more)
+    }
+
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
-        val row0: View = view.findViewById(R.id.col_row_0)
-        val row1: View = view.findViewById(R.id.col_row_1)
-        val row2: View = view.findViewById(R.id.col_row_2)
-        val row3: View = view.findViewById(R.id.col_row_3)
+        val rows: List<RowViews> = listOf(
+            RowViews(view.findViewById(R.id.col_row_0)),
+            RowViews(view.findViewById(R.id.col_row_1)),
+            RowViews(view.findViewById(R.id.col_row_2)),
+            RowViews(view.findViewById(R.id.col_row_3))
+        )
     }
 }

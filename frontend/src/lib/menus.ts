@@ -1,5 +1,5 @@
 import { core, Go } from './store.svelte'
-import { splitArtists } from './util'
+import { hasArtist, splitArtists } from './util'
 import type { MenuItem, Track } from './types'
 
 export function trackMenu(t: Track, opts: { onRemove?: () => void; playlistId?: number } = {}): MenuItem[] {
@@ -25,6 +25,27 @@ export function trackMenu(t: Track, opts: { onRemove?: () => void; playlistId?: 
     }
   }
   if (t.album) items.push({ label: 'Go to album', icon: 'album', action: () => core.go({ name: 'album', id: t.album }) })
+  items.push({
+    label: t.genres?.length
+      ? `Edit genres (${t.genres.length <= 3 ? t.genres.join(', ') : `${t.genres.slice(0, 3).join(', ')} +${t.genres.length - 3}`})…`
+      : 'Set genres…',
+    icon: 'tag',
+    action: () => (core.modal = { type: 'genre', trackIds: [t.id], label: t.title, current: t.genres ?? [] }),
+  })
+  if (artists.length > 0) {
+    const a0 = artists[0]
+    items.push({
+      label: `Set genres for all by ${a0}…`,
+      icon: 'tag',
+      action: () =>
+        (core.modal = {
+          type: 'genre',
+          trackIds: core.tracks.filter((x) => hasArtist(x, a0)).map((x) => x.id),
+          label: `all songs by ${a0}`,
+          current: t.genres ?? [],
+        }),
+    })
+  }
   items.push({ label: 'Show in file manager', icon: 'folder', action: () => Go.ShowInFolder(t.id) })
   items.push({
     label: 'Move file to trash',

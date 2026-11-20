@@ -17,6 +17,7 @@
     sortDir = $bindable(1),
     onreorder,
     onremove,
+    onplaytrack,
     numbered = true,
   }: {
     tracks: Track[]
@@ -28,6 +29,7 @@
     sortDir?: number
     onreorder?: (from: number, to: number) => void
     onremove?: (t: Track) => void
+    onplaytrack?: (ids: string[], index: number) => void
     numbered?: boolean
   } = $props()
 
@@ -75,11 +77,12 @@
       Go.TogglePlayPause()
       return
     }
-    core.play(
-      list.map((t) => t.id),
-      i,
-      { playlistId },
-    )
+    const playIds = list.map((t) => t.id)
+    if (onplaytrack) {
+      onplaytrack(playIds, i)
+      return
+    }
+    core.play(playIds, i, { playlistId })
   }
 
   onMount(() => {
@@ -148,7 +151,11 @@
       dragFrom = -1
       dragOver = -1
     }}
-    ondblclick={() => core.play(list.map((x) => x.id), i, { playlistId })}
+    ondblclick={() => {
+      const playIds = list.map((x) => x.id)
+      if (onplaytrack) onplaytrack(playIds, i)
+      else core.play(playIds, i, { playlistId })
+    }}
     oncontextmenu={(e) => core.openMenu(e, trackMenu(t, { onRemove: onremove ? () => onremove(t) : undefined }))}
   >
     <div class="num">
@@ -164,7 +171,7 @@
       </button>
     </div>
     <div class="info">
-      <Cover id={t.hasCover ? t.id : ''} class="thumb" />
+      <Cover id={t.hasCover ? t.id : ''} class="thumb" size={128} />
       <div class="txt">
         <div class="t-title">{t.title}</div>
         <div class="t-artist">

@@ -1,6 +1,5 @@
 package com.vibemusic.nativeapp.ui
 
-import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -8,6 +7,7 @@ import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.vibemusic.nativeapp.R
 import com.vibemusic.nativeapp.data.Playlist
@@ -26,9 +26,32 @@ class PlaylistAdapter(
     private var isPlaying: Boolean = false
 
     fun submitList(newList: List<Playlist>) {
+        val oldList = playlists.toList()
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize(): Int = oldList.size
+            override fun getNewListSize(): Int = newList.size
+
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                val o = oldList[oldItemPosition]
+                val n = newList[newItemPosition]
+                return if (o.id != 0L || n.id != 0L) o.id == n.id else o.name == n.name
+            }
+
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                return oldList[oldItemPosition] == newList[newItemPosition]
+            }
+        })
         playlists.clear()
         playlists.addAll(newList)
-        notifyDataSetChanged()
+        diff.dispatchUpdatesTo(this)
+    }
+
+    private fun isPlaylistActive(pl: Playlist, playlistId: Long, collectionKey: String): Boolean {
+        return if (pl.id != 0L) {
+            playlistId == pl.id || collectionKey == "playlist:${pl.id}"
+        } else {
+            collectionKey.isNotEmpty() && collectionKey == "collection:${pl.name}"
+        }
     }
 
     fun updatePlaybackState(playlistId: Long, collectionKey: String, playing: Boolean) {
@@ -38,16 +61,34 @@ class PlaylistAdapter(
         ) {
             return
         }
+        val oldPlaylistId = this.activePlaylistId
+        val oldCollectionKey = this.activeCollectionKey
         this.activePlaylistId = playlistId
         this.activeCollectionKey = collectionKey
         this.isPlaying = playing
-        notifyDataSetChanged()
+
+        for (i in playlists.indices) {
+            val pl = playlists[i]
+            val wasActive = isPlaylistActive(pl, oldPlaylistId, oldCollectionKey)
+            val nowActive = isPlaylistActive(pl, playlistId, collectionKey)
+            if (wasActive || nowActive) {
+                notifyItemChanged(i, PAYLOAD_PLAYBACK_STATE)
+            }
+        }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
         val layoutId = if (isGrid) R.layout.item_library_grid_card else R.layout.item_playlist_card
         val view = LayoutInflater.from(parent.context).inflate(layoutId, parent, false)
         return ViewHolder(view)
+    }
+
+    override fun onBindViewHolder(holder: ViewHolder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.contains(PAYLOAD_PLAYBACK_STATE)) {
+            bindPlaybackState(holder, playlists[position])
+            return
+        }
+        super.onBindViewHolder(holder, position, payloads)
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
@@ -57,40 +98,37 @@ class PlaylistAdapter(
 
         // 2x2 cover mosaic vs single cover
         val covers = pl.coverTracks
+        val mosaicViews = listOf(holder.mosaic1, holder.mosaic2, holder.mosaic3, holder.mosaic4)
         if (covers.size >= 4) {
+            holder.singleCover.tag = null
             holder.singleCover.visibility = View.GONE
             holder.mosaicGrid.visibility = View.VISIBLE
-            val views = listOf(holder.mosaic1, holder.mosaic2, holder.mosaic3, holder.mosaic4)
             for (i in 0 until 4) {
-                val f = store.getCoverFile(covers[i])
-                if (f.exists() && f.length() > 0) {
-                    val bmp = BitmapFactory.decodeFile(f.absolutePath)
-                    views[i].setImageBitmap(bmp)
-                } else {
-                    views[i].setImageResource(R.drawable.ic_music_note)
-                }
+                CoverLoader.loadInto(mosaicViews[i], store, covers[i], 256, R.drawable.ic_music_note)
             }
         } else {
+            for (mv in mosaicViews) {
+                mv.tag = null
+            }
             holder.mosaicGrid.visibility = View.GONE
             holder.singleCover.visibility = View.VISIBLE
-            if (covers.isNotEmpty()) {
-                val f = store.getCoverFile(covers[0])
-                if (f.exists() && f.length() > 0) {
-                    val bmp = BitmapFactory.decodeFile(f.absolutePath)
-                    holder.singleCover.setImageBitmap(bmp)
-                } else {
-                    holder.singleCover.setImageResource(R.drawable.ic_library)
-                }
-            } else {
-                holder.singleCover.setImageResource(R.drawable.ic_library)
-            }
+            CoverLoader.loadInto(holder.singleCover, store, covers.firstOrNull(), 384, R.drawable.ic_library)
         }
 
-        val isActive = if (pl.id != 0L) {
-            activePlaylistId == pl.id || activeCollectionKey == "playlist:${pl.id}"
+        bindPlaybackState(holder, pl)
+
+        if (onPlayClick != null) {
+            holder.playBtn?.visibility = View.VISIBLE
+            holder.playBtn?.setOnClickListener { onPlayClick.invoke(pl) }
         } else {
-            activeCollectionKey.isNotEmpty() && activeCollectionKey == "collection:${pl.name}"
+            holder.playBtn?.visibility = View.GONE
         }
+
+        holder.itemView.setOnClickListener { onPlaylistClick(pl) }
+    }
+
+    private fun bindPlaybackState(holder: ViewHolder, pl: Playlist) {
+        val isActive = isPlaylistActive(pl, activePlaylistId, activeCollectionKey)
         val isActivelyPlaying = isActive && isPlaying
 
         holder.name.setTextColor(
@@ -101,14 +139,8 @@ class PlaylistAdapter(
         )
 
         if (onPlayClick != null) {
-            holder.playBtn?.visibility = View.VISIBLE
             holder.playIcon?.setImageResource(if (isActivelyPlaying) R.drawable.ic_pause else R.drawable.ic_play)
-            holder.playBtn?.setOnClickListener { onPlayClick.invoke(pl) }
-        } else {
-            holder.playBtn?.visibility = View.GONE
         }
-
-        holder.itemView.setOnClickListener { onPlaylistClick(pl) }
     }
 
     override fun getItemCount(): Int = playlists.size
@@ -124,5 +156,9 @@ class PlaylistAdapter(
         val playIcon: ImageView? = view.findViewById(R.id.pl_btn_play_icon)
         val name: TextView = view.findViewById(R.id.pl_name)
         val count: TextView = view.findViewById(R.id.pl_count)
+    }
+
+    companion object {
+        private const val PAYLOAD_PLAYBACK_STATE = "playback_state"
     }
 }

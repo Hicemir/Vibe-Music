@@ -16,6 +16,7 @@ import com.yausername.aria2c.Aria2c
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,9 +29,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
@@ -49,7 +53,12 @@ class YtdlpManager(
 
     val authManager = YtMusicAuthManager(context)
     val ytMusicClient = YtMusicClient(authManager)
-    private val downloadSemaphore = Semaphore(2)
+    private val downloadSemaphore = Semaphore(1)
+    private val discoverySemaphore = Semaphore(3)
+    private val updateMutex = Mutex()
+    private val initReady = CompletableDeferred<Unit>()
+    private val updatedMarkerFile: File
+        get() = File(context.filesDir, "ytdlp_updated_v1")
 
     private val _jobs = MutableStateFlow(store.loadDownloadHistory())
     val jobs: StateFlow<List<DownloadJob>> = _jobs.asStateFlow()
@@ -164,11 +173,21 @@ class YtdlpManager(
 
                 val settings = store.loadSettings()
                 if (settings.autoUpdateYtdlp) {
-                    updateYtdlp()
+                    if (!updatedMarkerFile.exists()) {
+                        withTimeoutOrNull(25_000L) {
+                            performUpdateYtdlp()
+                        }
+                    } else {
+                        scope.launch { performUpdateYtdlp() }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e("YtdlpManager", "Failed to initialize YoutubeDL", e)
                 _statusMessage.value = "Init error: ${e.message}"
+            } finally {
+                if (!initReady.isCompleted) {
+                    initReady.complete(Unit)
+                }
             }
         }
     }
@@ -176,11 +195,21 @@ class YtdlpManager(
     fun updateYtdlp() {
         if (_isUpdating.value) return
         scope.launch {
+            performUpdateYtdlp()
+        }
+    }
+
+    private suspend fun performUpdateYtdlp() {
+        updateMutex.withLock {
+            if (_isUpdating.value) return
             _isUpdating.value = true
             _statusMessage.value = "Updating yt-dlp..."
             try {
                 val status = YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel._STABLE)
                 _statusMessage.value = "yt-dlp: $status"
+                if (status != null) {
+                    try { updatedMarkerFile.writeText(status.toString()) } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 Log.w("YtdlpManager", "Failed to update yt-dlp", e)
                 _statusMessage.value = "yt-dlp ready"
@@ -198,6 +227,34 @@ class YtdlpManager(
         }
         updateJob(jobId, persist = true) { cur ->
             cur.copy(status = "cancelled", error = "Cancelled by user", speed = "", eta = "", stage = "")
+        }
+    }
+
+    fun retryJob(jobId: String) {
+        val target = _jobs.value.find { it.id == jobId } ?: return
+        if (target.status == "downloading" || target.status == "pending") return
+        updateJob(jobId, persist = true) { cur ->
+            cur.copy(
+                status = "pending",
+                progress = 0f,
+                downloadedBytes = 0L,
+                totalBytes = 0L,
+                speed = "",
+                eta = "",
+                stage = "Queued...",
+                error = null
+            )
+        }
+        scope.launch {
+            processJob(jobId)
+        }
+    }
+
+    fun removeJob(jobId: String) {
+        synchronized(this) {
+            val updated = _jobs.value.filterNot { it.id == jobId }
+            _jobs.value = updated
+            store.saveDownloadHistory(updated)
         }
     }
 
@@ -412,6 +469,9 @@ class YtdlpManager(
         val initialJob = _jobs.value.find { it.id == jobId } ?: return@withPermit
         if (initialJob.status == "cancelled") return@withPermit
 
+        withTimeoutOrNull(30_000L) { initReady.await() }
+        updateMutex.withLock { /* wait if a yt-dlp binary update is in progress */ }
+
         if (!isInitialized) {
             try {
                 YoutubeDL.getInstance().init(context)
@@ -506,66 +566,10 @@ class YtdlpManager(
 
             val currentJobUrl = _jobs.value.find { it.id == jobId }?.url ?: initialJob.url
             val currentJobMode = _jobs.value.find { it.id == jobId }?.mode ?: initialJob.mode
+            val resolvedYtId = (_jobs.value.find { it.id == jobId }?.ytId ?: initialJob.ytId)
+                .ifBlank { extractYtId(currentJobUrl) }
 
-            val request = YoutubeDLRequest(currentJobUrl)
-            request.addOption("--progress")
-            request.addOption("--newline")
-            request.addOption("--progress-delta", "0.2")
-            request.addOption(
-                "--progress-template",
-                "download:VMPROG|%(progress._percent_str)s|%(progress._speed_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress._eta_str)s|%(info.title)s"
-            )
-            request.addOption("--no-colors")
-            request.addOption("--ignore-errors")
-            request.addOption("--no-overwrites")
-            request.addOption("--download-archive", archiveFile.absolutePath)
-            request.addOption("--cache-dir", context.cacheDir.absolutePath)
-            request.addOption("--paths", "temp:${tempDir.absolutePath}")
-            request.addOption("--embed-metadata")
-            request.addOption("--embed-thumbnail")
-            request.addOption("--parse-metadata", "yt:%(id)s:%(meta_comment)s")
-            request.addOption("--convert-thumbnails", "jpg")
-            request.addOption("--no-warnings")
-
-            if (currentJobMode == "playlist" && authManager.cookiesFile.exists()) {
-                request.addOption("--cookies", authManager.cookiesFile.absolutePath)
-            }
-
-            if (currentJobMode == "playlist") {
-                request.addOption("--yes-playlist")
-                request.addOption("--print", "before_dl:VMPL|%(playlist_title)s")
-                request.addOption("--print", "after_move:VMFILE|%(filepath)s|%(playlist_title)s")
-            } else {
-                request.addOption("--no-playlist")
-            }
-
-            // Audio format arguments
-            when (settings.downloadFormat.lowercase()) {
-                "opus" -> {
-                    request.addOption("-f", "bestaudio[ext=opus]/bestaudio/best")
-                    request.addOption("-x")
-                    request.addOption("--audio-format", "opus")
-                }
-                "mp3" -> {
-                    request.addOption("-f", "bestaudio/best")
-                    request.addOption("-x")
-                    request.addOption("--audio-format", "mp3")
-                }
-                "best" -> {
-                    request.addOption("-f", "bestaudio/best")
-                    request.addOption("-x")
-                    request.addOption("--audio-format", "best")
-                }
-                else -> { // m4a
-                    request.addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
-                    request.addOption("-x")
-                    request.addOption("--audio-format", "m4a")
-                }
-            }
-
-            request.addOption("-P", tempDir.absolutePath)
-            request.addOption("-o", "%(title)s [%(id)s].%(ext)s")
-
+            val audioExtensions = setOf("m4a", "mp3", "opus", "ogg", "flac", "wav")
             var lastSampleTimeMs = System.currentTimeMillis()
             var lastSampleBytes = 0L
             var lastComputedSpeed = ""
@@ -635,77 +639,205 @@ class YtdlpManager(
 
             var detectedPlaylistTitle = ""
             val skippedYtIds = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+            var lastAttemptError: String? = null
 
-            try {
-                YoutubeDL.getInstance().execute(request, jobId) { progress, etaInSeconds, line ->
-                    val curSnapshot = _jobs.value.find { it.id == jobId } ?: return@execute
-                    if (curSnapshot.status == "cancelled") return@execute
+            fun hasDownloadedAudio(): Boolean {
+                if (skippedYtIds.isNotEmpty()) return true
+                return tempDir.listFiles()?.any { file ->
+                    file.isFile && audioExtensions.contains(file.extension.lowercase())
+                } == true
+            }
 
-                    val nowMs = System.currentTimeMillis()
-                    val shouldPersistNow = (nowMs - lastPersistMs) >= 1000L
-                    if (shouldPersistNow) {
-                        lastPersistMs = nowMs
+            fun executeAttempt(targetUrl: String, useCookies: Boolean, playerClients: String?) {
+                if (_jobs.value.find { it.id == jobId }?.status == "cancelled") return
+                postProcessingStarted.set(false)
+                var tempCookie: File? = null
+                try {
+                    val request = YoutubeDLRequest(targetUrl)
+                    request.addOption("--progress")
+                    request.addOption("--newline")
+                    request.addOption("--progress-delta", "0.2")
+                    request.addOption(
+                        "--progress-template",
+                        "download:VMPROG|%(progress._percent_str)s|%(progress._speed_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress._eta_str)s|%(info.title)s"
+                    )
+                    request.addOption("--no-colors")
+                    if (currentJobMode == "playlist") {
+                        request.addOption("--ignore-errors")
                     }
+                    request.addOption("--no-overwrites")
+                    request.addOption("--download-archive", archiveFile.absolutePath)
+                    request.addOption("--cache-dir", context.cacheDir.absolutePath)
+                    request.addOption("--paths", "temp:${tempDir.absolutePath}")
+                    request.addOption("--embed-metadata")
+                    request.addOption("--embed-thumbnail")
+                    request.addOption("--parse-metadata", "yt:%(id)s:%(meta_comment)s")
+                    request.addOption("--convert-thumbnails", "jpg")
+                    request.addOption("--no-warnings")
 
-                    if (line.startsWith("VMPL|")) {
-                        val pl = cleanMetaString(line.removePrefix("VMPL|"))
-                        if (pl.isNotBlank()) detectedPlaylistTitle = pl
-                        return@execute
-                    }
-
-                    if (line.startsWith("VMFILE|")) {
-                        val parts = line.removePrefix("VMFILE|").split("|", limit = 2)
-                        val pl = if (parts.size >= 2) cleanMetaString(parts[1]) else ""
-                        if (pl.isNotBlank()) detectedPlaylistTitle = pl
-                        return@execute
-                    }
-
-                    val skipMatch = archiveSkipRegex.find(line)
-                    if (skipMatch != null) {
-                        val vid = skipMatch.groupValues[1]
-                        if (CanonicalKey.isValidYtId(vid)) {
-                            skippedYtIds.add(vid)
+                    if (useCookies) {
+                        tempCookie = authManager.createTempCookiesFile(tempDir)
+                        if (tempCookie != null) {
+                            request.addOption("--cookies", tempCookie.absolutePath)
                         }
-                        return@execute
+                    }
+                    if (!playerClients.isNullOrBlank()) {
+                        request.addOption("--extractor-args", "youtube:player_client=$playerClients")
                     }
 
-                    if (line.contains("VMPROG|")) {
-                        val payload = line.substringAfter("VMPROG|")
-                        val parts = payload.split("|", limit = 7)
-                        if (parts.size >= 6) {
-                            val rawPct = parts[0].trim().removeSuffix("%").trim().toFloatOrNull()
-                            val rawSpeed = cleanSpeedString(parts[1])
-                            var dlBytes = parts[2].trim().toDoubleOrNull()?.toLong()?.coerceAtLeast(0L) ?: 0L
-                            val totBytes = (parts[3].trim().toDoubleOrNull()?.toLong()?.takeIf { it > 0L }
-                                ?: parts[4].trim().toDoubleOrNull()?.toLong()?.takeIf { it > 0L }
-                                ?: 0L)
-                            val etaStr = cleanMetaString(parts[5])
-                            val infoTitle = if (parts.size >= 7) cleanMetaString(parts[6]) else ""
+                    if (currentJobMode == "playlist") {
+                        request.addOption("--yes-playlist")
+                        request.addOption("--print", "before_dl:VMPL|%(playlist_title)s")
+                        request.addOption("--print", "after_move:VMFILE|%(filepath)s|%(playlist_title)s")
+                    } else {
+                        request.addOption("--no-playlist")
+                    }
 
-                            val rawMediaPct = when {
-                                rawPct != null && !rawPct.isNaN() -> rawPct.coerceIn(0f, 100f)
-                                totBytes > 0L && dlBytes > 0L -> ((dlBytes.toDouble() / totBytes.toDouble()) * 100.0).toFloat().coerceIn(0f, 100f)
-                                else -> (curSnapshot.progress * 2f).coerceIn(0f, 100f)
-                            }
-                            if (dlBytes == 0L && totBytes > 0L && rawMediaPct > 0f) {
-                                dlBytes = ((rawMediaPct / 100.0) * totBytes).toLong()
-                            }
+                    // Audio format arguments
+                    when (settings.downloadFormat.lowercase()) {
+                        "opus" -> {
+                            request.addOption("-f", "bestaudio[ext=opus]/bestaudio/best")
+                            request.addOption("-x")
+                            request.addOption("--audio-format", "opus")
+                        }
+                        "mp3" -> {
+                            request.addOption("-f", "bestaudio/best")
+                            request.addOption("-x")
+                            request.addOption("--audio-format", "mp3")
+                        }
+                        "best" -> {
+                            request.addOption("-f", "bestaudio/best")
+                            request.addOption("-x")
+                            request.addOption("--audio-format", "best")
+                        }
+                        else -> { // m4a
+                            request.addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
+                            request.addOption("-x")
+                            request.addOption("--audio-format", "m4a")
+                        }
+                    }
 
-                            if (dlBytes < lastSampleBytes) {
-                                lastSampleBytes = dlBytes
-                                lastSampleTimeMs = nowMs
-                                lastComputedSpeed = ""
-                            } else if (dlBytes > lastSampleBytes) {
-                                val dtMs = nowMs - lastSampleTimeMs
-                                if (dtMs >= 500L) {
-                                    val bytesPerSec = ((dlBytes - lastSampleBytes) * 1000.0) / dtMs
-                                    lastComputedSpeed = formatSpeed(bytesPerSec)
-                                    lastSampleTimeMs = nowMs
+                    request.addOption("-P", tempDir.absolutePath)
+                    request.addOption("-o", "%(title)s [%(id)s].%(ext)s")
+
+                    YoutubeDL.getInstance().execute(request, jobId) { progress, etaInSeconds, line ->
+                        val curSnapshot = _jobs.value.find { it.id == jobId } ?: return@execute
+                        if (curSnapshot.status == "cancelled") return@execute
+
+                        if (line.contains("ERROR:")) {
+                            lastAttemptError = line.trim()
+                        }
+
+                        val nowMs = System.currentTimeMillis()
+                        val shouldPersistNow = (nowMs - lastPersistMs) >= 1000L
+                        if (shouldPersistNow) {
+                            lastPersistMs = nowMs
+                        }
+
+                        if (line.startsWith("VMPL|")) {
+                            val pl = cleanMetaString(line.removePrefix("VMPL|"))
+                            if (pl.isNotBlank()) detectedPlaylistTitle = pl
+                            return@execute
+                        }
+
+                        if (line.startsWith("VMFILE|")) {
+                            val parts = line.removePrefix("VMFILE|").split("|", limit = 2)
+                            val pl = if (parts.size >= 2) cleanMetaString(parts[1]) else ""
+                            if (pl.isNotBlank()) detectedPlaylistTitle = pl
+                            return@execute
+                        }
+
+                        val skipMatch = archiveSkipRegex.find(line)
+                        if (skipMatch != null) {
+                            val vid = skipMatch.groupValues[1]
+                            if (CanonicalKey.isValidYtId(vid)) {
+                                skippedYtIds.add(vid)
+                            }
+                            return@execute
+                        }
+
+                        if (line.contains("VMPROG|")) {
+                            val payload = line.substringAfter("VMPROG|")
+                            val parts = payload.split("|", limit = 7)
+                            if (parts.size >= 6) {
+                                val rawPct = parts[0].trim().removeSuffix("%").trim().toFloatOrNull()
+                                val rawSpeed = cleanSpeedString(parts[1])
+                                var dlBytes = parts[2].trim().toDoubleOrNull()?.toLong()?.coerceAtLeast(0L) ?: 0L
+                                val totBytes = (parts[3].trim().toDoubleOrNull()?.toLong()?.takeIf { it > 0L }
+                                    ?: parts[4].trim().toDoubleOrNull()?.toLong()?.takeIf { it > 0L }
+                                    ?: 0L)
+                                val etaStr = cleanMetaString(parts[5])
+                                val infoTitle = if (parts.size >= 7) cleanMetaString(parts[6]) else ""
+
+                                val rawMediaPct = when {
+                                    rawPct != null && !rawPct.isNaN() -> rawPct.coerceIn(0f, 100f)
+                                    totBytes > 0L && dlBytes > 0L -> ((dlBytes.toDouble() / totBytes.toDouble()) * 100.0).toFloat().coerceIn(0f, 100f)
+                                    else -> (curSnapshot.progress * 2f).coerceIn(0f, 100f)
+                                }
+                                if (dlBytes == 0L && totBytes > 0L && rawMediaPct > 0f) {
+                                    dlBytes = ((rawMediaPct / 100.0) * totBytes).toLong()
+                                }
+
+                                if (dlBytes < lastSampleBytes) {
                                     lastSampleBytes = dlBytes
+                                    lastSampleTimeMs = nowMs
+                                    lastComputedSpeed = ""
+                                } else if (dlBytes > lastSampleBytes) {
+                                    val dtMs = nowMs - lastSampleTimeMs
+                                    if (dtMs >= 500L) {
+                                        val bytesPerSec = ((dlBytes - lastSampleBytes) * 1000.0) / dtMs
+                                        lastComputedSpeed = formatSpeed(bytesPerSec)
+                                        lastSampleTimeMs = nowMs
+                                        lastSampleBytes = dlBytes
+                                    }
+                                }
+
+                                val scaledPct = (rawMediaPct * 0.5f).coerceIn(0f, 50f)
+                                if (rawMediaPct >= 99.9f) {
+                                    postProcessingStarted.set(true)
+                                    updateJob(jobId, persist = shouldPersistNow) { cur ->
+                                        val doneDl = maxOf(dlBytes, totBytes, cur.downloadedBytes, cur.totalBytes)
+                                        val doneTot = if (totBytes > 0L) totBytes else maxOf(cur.totalBytes, doneDl)
+                                        cur.copy(
+                                            status = "downloading",
+                                            progress = maxOf(cur.progress, 50f),
+                                            downloadedBytes = doneDl,
+                                            totalBytes = doneTot,
+                                            speed = "",
+                                            eta = "",
+                                            stage = if (cur.stage.isNotBlank() && cur.progress >= 50f) cur.stage else "Converting audio...",
+                                            title = if (infoTitle.isNotEmpty()) infoTitle else cur.title
+                                        )
+                                    }
+                                } else if (!postProcessingStarted.get()) {
+                                    val resolvedSpeed = rawSpeed.ifEmpty { lastComputedSpeed }
+                                    updateJob(jobId, persist = shouldPersistNow) { cur ->
+                                        cur.copy(
+                                            status = "downloading",
+                                            progress = maxOf(cur.progress, scaledPct),
+                                            downloadedBytes = if (dlBytes > 0L) dlBytes else cur.downloadedBytes,
+                                            totalBytes = if (totBytes > 0L) totBytes else cur.totalBytes,
+                                            speed = resolvedSpeed.ifEmpty { cur.speed },
+                                            eta = etaStr,
+                                            stage = "",
+                                            title = if (infoTitle.isNotEmpty()) infoTitle else cur.title
+                                        )
+                                    }
                                 }
                             }
+                            return@execute
+                        }
 
+                        val stdMatch = stdDownloadRegex.find(line)
+                        if (stdMatch != null) {
+                            val fallbackRawPct = (curSnapshot.progress * 2f).coerceIn(0f, 100f)
+                            val rawMediaPct = stdMatch.groupValues[1].toFloatOrNull()?.coerceIn(0f, 100f) ?: fallbackRawPct
+                            val totBytes = parseSizeToBytes(stdMatch.groupValues[2], stdMatch.groupValues[3])
+                            val dlBytes = if (totBytes > 0L) ((rawMediaPct / 100.0) * totBytes).toLong() else curSnapshot.downloadedBytes
+                            val parsedSpeed = cleanSpeedString(stdMatch.groupValues[4])
+                            val parsedEta = cleanMetaString(stdMatch.groupValues[5])
                             val scaledPct = (rawMediaPct * 0.5f).coerceIn(0f, 50f)
+
                             if (rawMediaPct >= 99.9f) {
                                 postProcessingStarted.set(true)
                                 updateJob(jobId, persist = shouldPersistNow) { cur ->
@@ -718,127 +850,135 @@ class YtdlpManager(
                                         totalBytes = doneTot,
                                         speed = "",
                                         eta = "",
-                                        stage = if (cur.stage.isNotBlank() && cur.progress >= 50f) cur.stage else "Converting audio...",
-                                        title = if (infoTitle.isNotEmpty()) infoTitle else cur.title
+                                        stage = if (cur.stage.isNotBlank() && cur.progress >= 50f) cur.stage else "Converting audio..."
                                     )
                                 }
                             } else if (!postProcessingStarted.get()) {
-                                val resolvedSpeed = rawSpeed.ifEmpty { lastComputedSpeed }
                                 updateJob(jobId, persist = shouldPersistNow) { cur ->
                                     cur.copy(
                                         status = "downloading",
                                         progress = maxOf(cur.progress, scaledPct),
-                                        downloadedBytes = if (dlBytes > 0L) dlBytes else cur.downloadedBytes,
+                                        downloadedBytes = dlBytes,
                                         totalBytes = if (totBytes > 0L) totBytes else cur.totalBytes,
-                                        speed = resolvedSpeed.ifEmpty { cur.speed },
-                                        eta = etaStr,
-                                        stage = "",
-                                        title = if (infoTitle.isNotEmpty()) infoTitle else cur.title
+                                        speed = parsedSpeed.ifEmpty { cur.speed },
+                                        eta = parsedEta.ifEmpty { if (etaInSeconds > 0) "${etaInSeconds}s" else "" },
+                                        stage = ""
                                     )
                                 }
                             }
+                            return@execute
                         }
-                        return@execute
-                    }
 
-                    val stdMatch = stdDownloadRegex.find(line)
-                    if (stdMatch != null) {
-                        val fallbackRawPct = (curSnapshot.progress * 2f).coerceIn(0f, 100f)
-                        val rawMediaPct = stdMatch.groupValues[1].toFloatOrNull()?.coerceIn(0f, 100f) ?: fallbackRawPct
-                        val totBytes = parseSizeToBytes(stdMatch.groupValues[2], stdMatch.groupValues[3])
-                        val dlBytes = if (totBytes > 0L) ((rawMediaPct / 100.0) * totBytes).toLong() else curSnapshot.downloadedBytes
-                        val parsedSpeed = cleanSpeedString(stdMatch.groupValues[4])
-                        val parsedEta = cleanMetaString(stdMatch.groupValues[5])
-                        val scaledPct = (rawMediaPct * 0.5f).coerceIn(0f, 50f)
-
-                        if (rawMediaPct >= 99.9f) {
-                            postProcessingStarted.set(true)
-                            updateJob(jobId, persist = shouldPersistNow) { cur ->
-                                val doneDl = maxOf(dlBytes, totBytes, cur.downloadedBytes, cur.totalBytes)
-                                val doneTot = if (totBytes > 0L) totBytes else maxOf(cur.totalBytes, doneDl)
-                                cur.copy(
-                                    status = "downloading",
-                                    progress = maxOf(cur.progress, 50f),
-                                    downloadedBytes = doneDl,
-                                    totalBytes = doneTot,
-                                    speed = "",
-                                    eta = "",
-                                    stage = if (cur.stage.isNotBlank() && cur.progress >= 50f) cur.stage else "Converting audio..."
-                                )
+                        if (line.contains("[download]") && line.contains("Destination:")) {
+                            val destName = line.substringAfter("Destination:").trim()
+                                .let { File(it).nameWithoutExtension }
+                                .replace(Regex("""\s*\[[A-Za-z0-9_-]{11}\]\s*$"""), "")
+                                .trim()
+                            if (destName.isNotEmpty()) {
+                                updateJob(jobId, persist = false) { cur ->
+                                    if (cur.title.isBlank() || cur.title == cur.url) {
+                                        cur.copy(title = destName)
+                                    } else cur
+                                }
                             }
-                        } else if (!postProcessingStarted.get()) {
-                            updateJob(jobId, persist = shouldPersistNow) { cur ->
-                                cur.copy(
-                                    status = "downloading",
-                                    progress = maxOf(cur.progress, scaledPct),
-                                    downloadedBytes = dlBytes,
-                                    totalBytes = if (totBytes > 0L) totBytes else cur.totalBytes,
-                                    speed = parsedSpeed.ifEmpty { cur.speed },
-                                    eta = parsedEta.ifEmpty { if (etaInSeconds > 0) "${etaInSeconds}s" else "" },
-                                    stage = ""
-                                )
-                            }
+                            return@execute
                         }
-                        return@execute
-                    }
 
-                    if (line.contains("[download]") && line.contains("Destination:")) {
-                        val destName = line.substringAfter("Destination:").trim()
-                            .let { File(it).nameWithoutExtension }
-                            .replace(Regex("""\s*\[[A-Za-z0-9_-]{11}\]\s*$"""), "")
-                            .trim()
-                        if (destName.isNotEmpty()) {
+                        if (!postProcessingStarted.get() && (line.contains("[youtube]") || line.contains("[info]"))) {
                             updateJob(jobId, persist = false) { cur ->
-                                if (cur.title.isBlank() || cur.title == cur.url) {
-                                    cur.copy(title = destName)
+                                if (cur.progress < 5f) {
+                                    cur.copy(progress = maxOf(cur.progress, 3f), stage = "Fetching stream info...")
                                 } else cur
                             }
+                            return@execute
                         }
-                        return@execute
-                    }
 
-                    if (!postProcessingStarted.get() && (line.contains("[youtube]") || line.contains("[info]"))) {
-                        updateJob(jobId, persist = false) { cur ->
-                            if (cur.progress < 5f) {
-                                cur.copy(progress = maxOf(cur.progress, 3f), stage = "Fetching stream info...")
-                            } else cur
+                        if (line.contains("[ThumbnailsConvertor]") || line.contains("Converting thumbnail")) {
+                            postProcessingStarted.set(true)
+                            enterPostProcessStage(55f, "Converting cover art...")
+                            return@execute
                         }
-                        return@execute
-                    }
 
-                    if (line.contains("[ThumbnailsConvertor]") || line.contains("Converting thumbnail")) {
-                        postProcessingStarted.set(true)
-                        enterPostProcessStage(55f, "Converting cover art...")
-                        return@execute
-                    }
+                        if (line.contains("[ExtractAudio]") || line.contains("[Fixup") || line.contains("[Merger]")) {
+                            postProcessingStarted.set(true)
+                            enterPostProcessStage(64f, "Converting audio...")
+                            return@execute
+                        }
 
-                    if (line.contains("[ExtractAudio]") || line.contains("[Fixup") || line.contains("[Merger]")) {
-                        postProcessingStarted.set(true)
-                        enterPostProcessStage(64f, "Converting audio...")
-                        return@execute
-                    }
+                        if (line.contains("[Metadata]") || line.contains("[ModifyChapters]")) {
+                            postProcessingStarted.set(true)
+                            enterPostProcessStage(76f, "Writing metadata tags...")
+                            return@execute
+                        }
 
-                    if (line.contains("[Metadata]") || line.contains("[ModifyChapters]")) {
-                        postProcessingStarted.set(true)
-                        enterPostProcessStage(76f, "Writing metadata tags...")
-                        return@execute
-                    }
+                        if (line.contains("[EmbedThumbnail]") || line.contains("Adding thumbnail")) {
+                            postProcessingStarted.set(true)
+                            enterPostProcessStage(84f, "Embedding cover art...")
+                            return@execute
+                        }
 
-                    if (line.contains("[EmbedThumbnail]") || line.contains("Adding thumbnail")) {
-                        postProcessingStarted.set(true)
-                        enterPostProcessStage(84f, "Embedding cover art...")
-                        return@execute
-                    }
-
-                    if (progress >= 0f && !postProcessingStarted.get()) {
-                        val scaledFallback = (progress * 0.5f).coerceIn(0f, 50f)
-                        updateJob(jobId, persist = shouldPersistNow) { cur ->
-                            cur.copy(
-                                progress = maxOf(cur.progress, scaledFallback),
-                                eta = if (etaInSeconds > 0) "${etaInSeconds}s" else cur.eta
-                            )
+                        if (progress >= 0f && !postProcessingStarted.get()) {
+                            val scaledFallback = (progress * 0.5f).coerceIn(0f, 50f)
+                            updateJob(jobId, persist = shouldPersistNow) { cur ->
+                                cur.copy(
+                                    progress = maxOf(cur.progress, scaledFallback),
+                                    eta = if (etaInSeconds > 0) "${etaInSeconds}s" else cur.eta
+                                )
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    val msg = e.message?.trim()
+                    if (!msg.isNullOrEmpty()) {
+                        lastAttemptError = msg
+                    }
+                    Log.w("YtdlpManager", "yt-dlp attempt failed (cookies=$useCookies, clients=${playerClients ?: "default"}): $msg")
+                } finally {
+                    try { tempCookie?.delete() } catch (_: Exception) {}
+                }
+            }
+
+            val isLoggedIn = authManager.isLoggedIn()
+            val usedCookiesInFirst = isLoggedIn
+            try {
+                // Attempt 1: Authenticated (if logged in) with default clients
+                executeAttempt(currentJobUrl, useCookies = usedCookiesInFirst, playerClients = null)
+
+                // Attempt 2: Fallback across cookie-less JS-less clients or authenticated non-default clients
+                if (!hasDownloadedAudio() && _jobs.value.find { it.id == jobId }?.status != "cancelled") {
+                    if (usedCookiesInFirst) {
+                        executeAttempt(
+                            currentJobUrl,
+                            useCookies = false,
+                            playerClients = "android_vr,visionos,ios,tv"
+                        )
+                    } else if (authManager.isLoggedIn()) {
+                        executeAttempt(
+                            currentJobUrl,
+                            useCookies = true,
+                            playerClients = "tv_downgraded,tv_samsung,tv,web_embedded,mweb,web_music,web"
+                        )
+                    }
+                }
+
+                // Attempt 3: Authenticated non-default clients when Attempt 1 used cookies + default clients
+                if (!hasDownloadedAudio() && _jobs.value.find { it.id == jobId }?.status != "cancelled" && usedCookiesInFirst && authManager.isLoggedIn()) {
+                    executeAttempt(
+                        currentJobUrl,
+                        useCookies = true,
+                        playerClients = "tv_downgraded,tv_samsung,tv,web_embedded,mweb,web_music,web"
+                    )
+                }
+
+                // Attempt 4: Direct YouTube Music watch URL with web_music / tv_downgraded clients
+                if (!hasDownloadedAudio() && _jobs.value.find { it.id == jobId }?.status != "cancelled" &&
+                    authManager.isLoggedIn() && currentJobMode == "track" && resolvedYtId.isNotBlank()
+                ) {
+                    executeAttempt(
+                        "https://music.youtube.com/watch?v=$resolvedYtId",
+                        useCookies = true,
+                        playerClients = "web_music,tv_downgraded,web_embedded"
+                    )
                 }
             } finally {
                 tickerJob.cancel()
@@ -850,10 +990,13 @@ class YtdlpManager(
 
             // Move completed audio files from tempDir to targetDir (or fallback external music dir)
             enterPostProcessStage(92f, "Saving to music folder...")
-            val audioExtensions = setOf("m4a", "mp3", "opus", "ogg", "flac", "wav")
             val downloadedFiles = tempDir.listFiles()?.filter { file ->
                 file.isFile && audioExtensions.contains(file.extension.lowercase())
             } ?: emptyList()
+
+            if (downloadedFiles.isEmpty() && skippedYtIds.isEmpty()) {
+                throw RuntimeException(lastAttemptError ?: "Download failed")
+            }
 
             val finalSizeBytes = downloadedFiles.sumOf { it.length() }
 
@@ -1020,7 +1163,9 @@ class YtdlpManager(
         "lessons", "synthesia", "piano tutorial", "guitar tab", "karaoke"
     )
 
-    private fun ensureInitialized(): Boolean {
+    private suspend fun ensureInitialized(): Boolean {
+        withTimeoutOrNull(30_000L) { initReady.await() }
+        updateMutex.withLock { /* wait if a yt-dlp binary update is in progress */ }
         if (isInitialized) return true
         return try {
             YoutubeDL.getInstance().init(context)
@@ -1101,74 +1246,80 @@ class YtdlpManager(
         return if (allowSeedFallback && fallbackArtist.isNotBlank()) fallbackArtist else "YouTube"
     }
 
-    private fun fetchFlatPlaylistEntries(
+    private suspend fun fetchFlatPlaylistEntries(
         targetUrl: String,
         playlistEnd: Int = 22,
         fallbackArtist: String = "",
         allowSeedFallback: Boolean = false
     ): List<DiscoverItem> {
         val out = mutableListOf<DiscoverItem>()
-        try {
-            val request = YoutubeDLRequest(targetUrl)
-            if (authManager.cookiesFile.exists()) {
-                request.addOption("--cookies", authManager.cookiesFile.absolutePath)
-            }
-            request.addOption("--flat-playlist")
-            request.addOption("-J")
-            if (playlistEnd > 0) {
-                request.addOption("--playlist-end", playlistEnd.toString())
-            }
-            request.addOption("--no-warnings")
+        return discoverySemaphore.withPermit {
+            var tempCookie: File? = null
+            try {
+                tempCookie = authManager.createTempCookiesFile()
+                val request = YoutubeDLRequest(targetUrl)
+                if (tempCookie != null) {
+                    request.addOption("--cookies", tempCookie.absolutePath)
+                }
+                request.addOption("--flat-playlist")
+                request.addOption("-J")
+                if (playlistEnd > 0) {
+                    request.addOption("--playlist-end", playlistEnd.toString())
+                }
+                request.addOption("--no-warnings")
 
-            val response = YoutubeDL.getInstance().execute(request)
-            val jsonText = response.out
-            if (jsonText.isNullOrBlank()) return emptyList()
+                val response = YoutubeDL.getInstance().execute(request)
+                val jsonText = response.out
+                if (jsonText.isNullOrBlank()) return@withPermit emptyList()
 
-            val root = JSONObject(jsonText)
-            val entries = root.optJSONArray("entries") ?: return emptyList()
+                val root = JSONObject(jsonText)
+                val entries = root.optJSONArray("entries") ?: return@withPermit emptyList()
 
-            for (i in 0 until entries.length()) {
-                val item = entries.optJSONObject(i) ?: continue
-                val id = item.optString("id", "").trim()
-                if (!CanonicalKey.isValidYtId(id)) continue
+                for (i in 0 until entries.length()) {
+                    val item = entries.optJSONObject(i) ?: continue
+                    val id = item.optString("id", "").trim()
+                    if (!CanonicalKey.isValidYtId(id)) continue
 
-                val title = item.optString("title", "").trim()
-                val rawChannel = item.optString("channel", "").ifEmpty {
-                    item.optString("uploader", "")
-                }.trim()
-                val rawDur = item.optDouble("duration", 0.0)
-                val duration = if (rawDur.isNaN() || rawDur < 0.0) 0.0 else rawDur
+                    val title = item.optString("title", "").trim()
+                    val rawChannel = item.optString("channel", "").ifEmpty {
+                        item.optString("uploader", "")
+                    }.trim()
+                    val rawDur = item.optDouble("duration", 0.0)
+                    val duration = if (rawDur.isNaN() || rawDur < 0.0) 0.0 else rawDur
 
-                if (isNonMusicEntry(title, rawChannel, duration)) continue
+                    if (isNonMusicEntry(title, rawChannel, duration)) continue
 
-                var thumbnail = item.optString("thumbnail", "")
-                if (thumbnail.isBlank()) {
-                    val thumbsArr = item.optJSONArray("thumbnails")
-                    if (thumbsArr != null && thumbsArr.length() > 0) {
-                        thumbnail = thumbsArr.optJSONObject(thumbsArr.length() - 1)?.optString("url", "") ?: ""
+                    var thumbnail = item.optString("thumbnail", "")
+                    if (thumbnail.isBlank()) {
+                        val thumbsArr = item.optJSONArray("thumbnails")
+                        if (thumbsArr != null && thumbsArr.length() > 0) {
+                            thumbnail = thumbsArr.optJSONObject(thumbsArr.length() - 1)?.optString("url", "") ?: ""
+                        }
                     }
-                }
-                if (thumbnail.isBlank()) {
-                    thumbnail = "https://i.ytimg.com/vi/$id/mqdefault.jpg"
-                }
+                    if (thumbnail.isBlank()) {
+                        thumbnail = "https://i.ytimg.com/vi/$id/mqdefault.jpg"
+                    }
 
-                val artist = cleanEntryArtist(rawChannel, title, fallbackArtist, allowSeedFallback)
-                out.add(
-                    DiscoverItem(
-                        id = "yt:$id",
-                        ytId = id,
-                        title = title,
-                        artist = artist,
-                        duration = duration,
-                        thumbnailUrl = thumbnail,
-                        isOwned = false
+                    val artist = cleanEntryArtist(rawChannel, title, fallbackArtist, allowSeedFallback)
+                    out.add(
+                        DiscoverItem(
+                            id = "yt:$id",
+                            ytId = id,
+                            title = title,
+                            artist = artist,
+                            duration = duration,
+                            thumbnailUrl = thumbnail,
+                            isOwned = false
+                        )
                     )
-                )
+                }
+            } catch (e: Exception) {
+                Log.w("YtdlpManager", "Discovery query failed for $targetUrl: ${e.message}")
+            } finally {
+                try { tempCookie?.delete() } catch (_: Exception) {}
             }
-        } catch (e: Exception) {
-            Log.w("YtdlpManager", "Discovery query failed for $targetUrl: ${e.message}")
+            out
         }
-        return out
     }
 
     private fun weightedSelectArtists(
@@ -1325,20 +1476,20 @@ class YtdlpManager(
         val unvisited = rankedArtists.filter {
             !excludeNorms.contains(it.normArtist) && !shownHomeArtists.contains(it.normArtist)
         }
-        chosenArtists.addAll(weightedSelectArtists(unvisited, 8))
+        chosenArtists.addAll(weightedSelectArtists(unvisited, 4))
 
-        if (chosenArtists.size < 8) {
+        if (chosenArtists.size < 4) {
             val pickedNorms = chosenArtists.map { it.normArtist }.toMutableSet()
             val notExcluded = rankedArtists.filter { !pickedNorms.contains(it.normArtist) && !excludeNorms.contains(it.normArtist) }
             if (notExcluded.isNotEmpty()) {
-                val extra = weightedSelectArtists(notExcluded, 8 - chosenArtists.size)
+                val extra = weightedSelectArtists(notExcluded, 4 - chosenArtists.size)
                 chosenArtists.addAll(extra)
                 pickedNorms.addAll(extra.map { it.normArtist })
             }
-            if (chosenArtists.size < 8) {
+            if (chosenArtists.size < 4) {
                 shownHomeArtists.clear()
                 val remaining = rankedArtists.filter { !pickedNorms.contains(it.normArtist) }
-                chosenArtists.addAll(weightedSelectArtists(remaining, 8 - chosenArtists.size))
+                chosenArtists.addAll(weightedSelectArtists(remaining, 4 - chosenArtists.size))
             }
         }
         for (art in chosenArtists) {
@@ -1357,7 +1508,7 @@ class YtdlpManager(
             }
         }
 
-        if (selectedSeeds.size < 8) {
+        if (selectedSeeds.size < 4) {
             val scoredTracks = allTracks.filter { !usedTrackIds.contains(it.id) }
                 .sortedByDescending {
                     val base = RecommendationEngine.scoreTrackAffinity(
@@ -1370,7 +1521,7 @@ class YtdlpManager(
                     base + if (!it.ytId.isNullOrBlank()) 25.0 else 0.0
                 }
             for (t in scoredTracks) {
-                if (selectedSeeds.size >= 8) break
+                if (selectedSeeds.size >= 4) break
                 usedTrackIds.add(t.id)
                 val primaryArtist = CanonicalKey.splitArtists(t.artist)
                     .firstOrNull { !it.equals("Unknown Artist", ignoreCase = true) } ?: ""
@@ -1410,8 +1561,8 @@ class YtdlpManager(
                 }
             }
 
-            // Also run up to 3 rotated direct catalog queries for top library artists
-            val directArtists = chosenArtists.take(3)
+            // Also run up to 2 rotated direct catalog queries for top library artists
+            val directArtists = chosenArtists.take(2)
             val directDeferreds = directArtists.mapIndexed { idx, aff ->
                 async(Dispatchers.IO) {
                     val suffix = searchSuffixes[(round + idx + 1) % searchSuffixes.size]

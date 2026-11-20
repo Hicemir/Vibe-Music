@@ -20,7 +20,7 @@
   const active = $derived.by(() => {
     if (!lyrics.synced) return -1
     let a = -1
-    for (let i = 0; i < lines.length; i++) if (lines[i].time <= core.player.position + 0.15) a = i
+    for (let i = 0; i < lines.length; i++) if (lines[i].time <= core.position + 0.15) a = i
     return a
   })
 

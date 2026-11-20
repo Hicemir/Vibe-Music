@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,12 +27,14 @@ var audioExts = map[string]bool{
 }
 
 type Scanner struct {
-	store   *Store
-	emit    func(event string, data ...any)
-	scanMu  sync.Mutex
-	mu      sync.Mutex
-	watcher *fsnotify.Watcher
-	timer   *time.Timer
+	store     *Store
+	emit      func(event string, data ...any)
+	scanMu    sync.Mutex
+	mu        sync.Mutex
+	watcher   *fsnotify.Watcher
+	timer     *time.Timer
+	onChanged func() // called when scan added/updated/removed tracks
+	onDone    func() // called after every full scan
 }
 
 func NewScanner(store *Store, emit func(string, ...any)) *Scanner {
@@ -130,7 +136,7 @@ func fallbackTitle(path string) (artist, title string) {
 }
 
 // readTrack probes a file and derives its canonical key (yt:<id> or local:<hash>) without using its path.
-func (s *Scanner) readTrack(path string, info fs.FileInfo, rootKey, rel string) (Track, bool) {
+func (s *Scanner) readTrack(path string, info fs.FileInfo, rootKey, rel string) (Track, bool, bool) {
 	t := Track{Path: path, RootKey: rootKey, RelPath: rel, Size: info.Size(), MTime: info.ModTime().Unix(), AddedAt: info.ModTime().Unix()}
 	t.Format = strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
 	p, err := probe(path)
@@ -143,13 +149,13 @@ func (s *Scanner) readTrack(path string, info fs.FileInfo, rootKey, rel string) 
 	} else if h, herr := localContentID(path, info.Size()); herr == nil {
 		t.ID = h
 	} else {
-		return t, false
+		return t, false, false
 	}
 	if err != nil {
 		fa, ft := fallbackTitle(path)
 		t.Title = ft
 		t.Artist = cleanArtistString(fa)
-		return t, true
+		return t, false, true
 	}
 	t.Title = strings.TrimSpace(tags["title"])
 	t.Artist = strings.TrimSpace(tags["artist"])
@@ -168,17 +174,24 @@ func (s *Scanner) readTrack(path string, info fs.FileInfo, rootKey, rel string) 
 	if y := yearRe.FindString(firstNonEmpty(tags["date"], tags["year"])); y != "" {
 		t.Year, _ = strconv.Atoi(y)
 	}
+	if gs := tagGenres(tags["genre"]); len(gs) > 0 {
+		t.Genre, t.GenreSource = joinGenres(gs), "tag"
+	}
 	t.Duration, _ = strconv.ParseFloat(p.Format.Duration, 64)
 	if br, err := strconv.Atoi(p.Format.BitRate); err == nil {
 		t.Bitrate = br / 1000
 	}
+	hasVideo := false
+	gotAudio := false
 	for _, st := range p.Streams {
-		if st.CodecType == "audio" && st.CodecName != "" {
+		if st.CodecType == "audio" && st.CodecName != "" && !gotAudio {
 			t.Format = st.CodecName
-			break
+			gotAudio = true
+		} else if st.CodecType == "video" {
+			hasVideo = true
 		}
 	}
-	return t, true
+	return t, hasVideo, true
 }
 
 func firstNonEmpty(v ...string) string {
@@ -194,26 +207,101 @@ func coverPath(id string) string {
 	return filepath.Join(coverDir(), coverKey(id)+".jpg")
 }
 
-// extractCover tries embedded art, then a sidecar image next to the file.
-func extractCover(path string, id string) bool {
+func writeAtomicBytes(dst string, data []byte) bool {
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "cover-*.tmp")
+	if err != nil {
+		return false
+	}
+	tmpPath := tmp.Name()
+	_, wErr := tmp.Write(data)
+	cErr := tmp.Close()
+	if wErr != nil || cErr != nil {
+		_ = os.Remove(tmpPath)
+		return false
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		_ = os.Remove(tmpPath)
+		return false
+	}
+	return true
+}
+
+func resizeSidecarGo(src, dst string, maxWidth int) bool {
+	f, err := os.Open(src)
+	if err != nil {
+		return false
+	}
+	img, _, decErr := image.Decode(f)
+	_ = f.Close()
+	if decErr != nil || img == nil {
+		return false
+	}
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(src))
+	if w <= maxWidth && (ext == ".jpg" || ext == ".jpeg") {
+		if data, err := os.ReadFile(src); err == nil && len(data) > 0 {
+			if writeAtomicBytes(dst, data) {
+				return true
+			}
+		}
+	}
+	var outImg image.Image = img
+	if w > maxWidth {
+		nw := maxWidth
+		nh := (h * maxWidth) / w
+		if nh < 1 {
+			nh = 1
+		}
+		outImg = downscaleCover(img, nw, nh)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "cover-*.tmp")
+	if err != nil {
+		return false
+	}
+	tmpPath := tmp.Name()
+	encErr := jpeg.Encode(tmp, outImg, &jpeg.Options{Quality: 90})
+	closeErr := tmp.Close()
+	if encErr != nil || closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return false
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		_ = os.Remove(tmpPath)
+		return false
+	}
+	return true
+}
+
+// extractCover tries embedded art (when a video/cover stream is present), then a sidecar image next to the file.
+func extractCover(path string, id string, hasVideoStream bool) bool {
 	out := coverPath(id)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-v", "error", "-i", path, "-an", "-map", "0:v:0", "-frames:v", "1",
-		"-vf", "scale='min(600,iw)':-2", "-q:v", "3", out)
-	setCmdHidden(cmd)
-	if err := cmd.Run(); err == nil {
-		if st, err := os.Stat(out); err == nil && st.Size() > 0 {
-			return true
+	if hasVideoStream {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		cmd := exec.CommandContext(ctx, "ffmpeg", "-y", "-v", "error", "-i", path, "-an", "-map", "0:v:0", "-frames:v", "1",
+			"-vf", "scale='min(800,iw)':-2", "-q:v", "2", out)
+		setCmdHidden(cmd)
+		err := cmd.Run()
+		cancel()
+		if err == nil {
+			if st, err := os.Stat(out); err == nil && st.Size() > 0 {
+				return true
+			}
 		}
 	}
 	base := strings.TrimSuffix(path, filepath.Ext(path))
 	for _, ext := range []string{".jpg", ".jpeg", ".png", ".webp"} {
 		side := base + ext
 		if _, err := os.Stat(side); err == nil {
+			if ext != ".webp" && resizeSidecarGo(side, out, 800) {
+				return true
+			}
 			c2, cancel2 := context.WithTimeout(context.Background(), 20*time.Second)
 			cmd2 := exec.CommandContext(c2, "ffmpeg", "-y", "-v", "error", "-i", side, "-frames:v", "1",
-				"-vf", "scale='min(600,iw)':-2", "-q:v", "3", out)
+				"-vf", "scale='min(800,iw)':-2", "-q:v", "2", out)
 			setCmdHidden(cmd2)
 			err := cmd2.Run()
 			cancel2()
@@ -221,7 +309,7 @@ func extractCover(path string, id string) bool {
 				return true
 			}
 			if b, err := os.ReadFile(side); err == nil && len(b) > 0 {
-				if os.WriteFile(out, b, 0o644) == nil {
+				if writeAtomicBytes(out, b) {
 					return true
 				}
 			}
@@ -315,23 +403,29 @@ func (s *Scanner) Scan(dirs []string) {
 	total := len(jobs)
 	var done atomic.Int32
 	ch := make(chan job)
+	workers := runtime.NumCPU()
+	if workers < 4 {
+		workers = 4
+	} else if workers > 12 {
+		workers = 12
+	}
 	var wg sync.WaitGroup
-	for i := 0; i < 6; i++ {
+	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := range ch {
-				t, ok := s.readTrack(j.path, j.info, j.rootKey, j.rel)
+				t, hasVideo, ok := s.readTrack(j.path, j.info, j.rootKey, j.rel)
 				if ok {
 					if j.old != nil {
 						t.AddedAt = j.old.AddedAt
 					}
-					id, err := s.store.UpsertTrack(t)
-					if err == nil {
-						t.ID = id
-						t.HasCover = extractCover(j.path, id)
-						_, _ = s.store.UpsertTrack(t)
+					if j.old != nil || !fileExists(coverPath(t.ID)) {
+						t.HasCover = extractCover(j.path, t.ID, hasVideo)
+					} else {
+						t.HasCover = true
 					}
+					_, _ = s.store.UpsertTrack(t)
 				}
 				n := int(done.Add(1))
 				if n%10 == 0 || n == total {
@@ -347,8 +441,56 @@ func (s *Scanner) Scan(dirs []string) {
 	wg.Wait()
 	s.emit("library:scan", map[string]any{"scanning": false, "done": total, "total": total})
 	if total > 0 || len(gone) > 0 {
+		if s.onChanged != nil {
+			s.onChanged()
+		}
 		s.emit("library:changed")
 	}
+	if s.onDone != nil {
+		s.onDone()
+	}
+}
+
+// IngestFile adds or refreshes a single file without walking any directory. dirs are the configured
+// library roots; the file must live under one of them. Returns false if it could not be indexed.
+func (s *Scanner) IngestFile(path string, dirs []string) bool {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(abs)
+	if err != nil || info.IsDir() || !audioExts[strings.ToLower(filepath.Ext(abs))] {
+		return false
+	}
+	best := ""
+	for _, d := range dirs {
+		d = filepath.Clean(d)
+		if strings.HasPrefix(abs, d+string(filepath.Separator)) && len(d) > len(best) {
+			best = d
+		}
+	}
+	if best == "" {
+		return false
+	}
+	rootKey := s.store.EnsureRoot(best)
+	r, err := filepath.Rel(best, abs)
+	if err != nil {
+		return false
+	}
+	rel, ok := cleanRelPath(filepath.ToSlash(r))
+	if !ok {
+		return false
+	}
+	t, hasVideo, ok := s.readTrack(abs, info, rootKey, rel)
+	if !ok {
+		return false
+	}
+	if old, found := s.store.TrackByRel(rootKey, rel); found {
+		t.AddedAt = old.AddedAt
+	}
+	t.HasCover = extractCover(abs, t.ID, hasVideo)
+	_, err = s.store.UpsertTrack(t)
+	return err == nil
 }
 
 func fileExists(p string) bool {

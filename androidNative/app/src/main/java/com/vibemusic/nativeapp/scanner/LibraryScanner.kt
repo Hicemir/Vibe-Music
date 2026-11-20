@@ -8,6 +8,8 @@ import android.util.Log
 import com.vibemusic.nativeapp.data.CanonicalKey
 import com.vibemusic.nativeapp.data.Track
 import com.vibemusic.nativeapp.data.VibeStore
+import com.vibemusic.nativeapp.genre.GenreTaxonomy
+import com.vibemusic.nativeapp.ui.CoverLoader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -135,6 +137,8 @@ class LibraryScanner(
         var album = ""
         var year = 0
         var bitrate = 0
+        var genre = ""
+        var genreSource = ""
         var hasCover = false
         var embeddedPic: ByteArray? = null
 
@@ -148,6 +152,13 @@ class LibraryScanner(
             title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) ?: ""
             artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) ?: ""
             album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM) ?: ""
+
+            val rawGenre = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE) ?: ""
+            val mappedGenres = GenreTaxonomy.tagGenres(rawGenre)
+            if (mappedGenres.isNotEmpty()) {
+                genre = GenreTaxonomy.joinGenres(mappedGenres)
+                genreSource = "tag"
+            }
 
             val yearStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR)
                 ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
@@ -202,9 +213,29 @@ class LibraryScanner(
             format = file.extension.lowercase(),
             bitrate = bitrate,
             fileSize = size,
-            mtimeUnix = mtime
+            mtimeUnix = mtime,
+            genre = genre,
+            genreSource = genreSource
         )
         return track
+    }
+
+    fun probeFileGenres(absPath: String): List<String> {
+        if (absPath.isBlank()) return emptyList()
+        val f = File(absPath)
+        if (!f.exists()) return emptyList()
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(absPath)
+            val raw = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE) ?: ""
+            GenreTaxonomy.tagGenres(raw)
+        } catch (_: Exception) {
+            emptyList()
+        } finally {
+            try {
+                retriever.release()
+            } catch (_: Exception) {}
+        }
     }
 
     private fun extractAndSaveCover(file: File, trackId: String, embedded: ByteArray?): Boolean {
@@ -219,6 +250,7 @@ class LibraryScanner(
                 if (bmp != null) {
                     saveScaledCover(bmp, targetCover)
                     bmp.recycle()
+                    CoverLoader.invalidate(trackId)
                     return true
                 }
             }
@@ -240,6 +272,7 @@ class LibraryScanner(
                         if (bmp != null) {
                             saveScaledCover(bmp, targetCover)
                             bmp.recycle()
+                            CoverLoader.invalidate(trackId)
                             return true
                         }
                     }

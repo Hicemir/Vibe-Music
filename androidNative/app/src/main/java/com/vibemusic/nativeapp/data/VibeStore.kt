@@ -5,6 +5,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.vibemusic.nativeapp.genre.GenreTaxonomy
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -59,6 +60,8 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
               file_size INTEGER NOT NULL DEFAULT 0,
               mtime_unix INTEGER NOT NULL DEFAULT 0,
               updated_at INTEGER NOT NULL DEFAULT 0,
+              genre TEXT NOT NULL DEFAULT '',
+              genre_source TEXT NOT NULL DEFAULT '',
               UNIQUE(root_key, rel_path)
             );
             """.trimIndent()
@@ -95,15 +98,62 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         )
         db.execSQL("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
         db.execSQL("CREATE TABLE IF NOT EXISTS hidden_tracks(track_id TEXT PRIMARY KEY);")
+        ensureGenreSchema(db)
+        ensureIndexes(db)
     }
 
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
         db.execSQL("CREATE TABLE IF NOT EXISTS hidden_tracks(track_id TEXT PRIMARY KEY);")
+        ensureGenreSchema(db)
+        ensureIndexes(db)
+    }
+
+    private fun ensureIndexes(db: SQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_tracks_added ON tracks(added_at DESC, id DESC);")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_play_history_track ON play_history(track_id);")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Handled cleanly; schema matches PC Phase 1
+        ensureGenreSchema(db)
+    }
+
+    private fun ensureGenreSchema(db: SQLiteDatabase) {
+        val cols = HashSet<String>()
+        db.rawQuery("PRAGMA table_info(tracks)", null).use { c ->
+            val nameIdx = c.getColumnIndex("name")
+            while (c.moveToNext()) {
+                if (nameIdx >= 0) cols.add(c.getString(nameIdx))
+            }
+        }
+        if (cols.isNotEmpty()) {
+            if (!cols.contains("genre")) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN genre TEXT NOT NULL DEFAULT ''")
+            }
+            if (!cols.contains("genre_source")) {
+                db.execSQL("ALTER TABLE tracks ADD COLUMN genre_source TEXT NOT NULL DEFAULT ''")
+            }
+        }
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS artist_genres(
+              artist_key TEXT PRIMARY KEY,
+              genre TEXT NOT NULL DEFAULT '',
+              source TEXT NOT NULL DEFAULT '',
+              checked_at INTEGER NOT NULL DEFAULT 0
+            );
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS track_context(
+              cache_key TEXT PRIMARY KEY,
+              hints TEXT NOT NULL DEFAULT '',
+              updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            """.trimIndent()
+        )
     }
 
     // -------------------------------------------------------------
@@ -169,35 +219,64 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         return File(base, osRel).path
     }
 
+    private val coversDir: File by lazy {
+        File(context.filesDir, "covers").apply { mkdirs() }
+    }
+
     fun getCoverFile(trackId: String): File {
-        val dir = File(context.filesDir, "covers").apply { mkdirs() }
-        return File(dir, "${CanonicalKey.coverKey(trackId)}.jpg")
+        return File(coversDir, "${CanonicalKey.coverKey(trackId)}.jpg")
     }
 
     // -------------------------------------------------------------
     // Tracks CRUD
     // -------------------------------------------------------------
 
-    private fun cursorToTrack(cursor: Cursor): Track {
-        val id = cursor.getString(cursor.getColumnIndexOrThrow("id"))
-        val ytId = cursor.getString(cursor.getColumnIndexOrThrow("yt_id"))
-        val rootKey = cursor.getString(cursor.getColumnIndexOrThrow("root_key"))
-        val relPath = cursor.getString(cursor.getColumnIndexOrThrow("rel_path"))
-        val title = cursor.getString(cursor.getColumnIndexOrThrow("title"))
-        val artist = cursor.getString(cursor.getColumnIndexOrThrow("artist"))
-        val album = cursor.getString(cursor.getColumnIndexOrThrow("album"))
-        val duration = cursor.getDouble(cursor.getColumnIndexOrThrow("duration"))
-        val year = cursor.getInt(cursor.getColumnIndexOrThrow("year"))
-        val addedAt = cursor.getLong(cursor.getColumnIndexOrThrow("added_at"))
-        val liked = cursor.getInt(cursor.getColumnIndexOrThrow("liked")) != 0
-        val playCount = cursor.getInt(cursor.getColumnIndexOrThrow("play_count"))
-        val lastPlayed = cursor.getLong(cursor.getColumnIndexOrThrow("last_played"))
-        val hasCover = cursor.getInt(cursor.getColumnIndexOrThrow("has_cover")) != 0
-        val format = cursor.getString(cursor.getColumnIndexOrThrow("format"))
-        val bitrate = cursor.getInt(cursor.getColumnIndexOrThrow("bitrate"))
-        val fileSize = cursor.getLong(cursor.getColumnIndexOrThrow("file_size"))
-        val mtimeUnix = cursor.getLong(cursor.getColumnIndexOrThrow("mtime_unix"))
-        val updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at"))
+    private class TrackCursorCols(cursor: Cursor) {
+        val id = cursor.getColumnIndexOrThrow("id")
+        val ytId = cursor.getColumnIndexOrThrow("yt_id")
+        val rootKey = cursor.getColumnIndexOrThrow("root_key")
+        val relPath = cursor.getColumnIndexOrThrow("rel_path")
+        val title = cursor.getColumnIndexOrThrow("title")
+        val artist = cursor.getColumnIndexOrThrow("artist")
+        val album = cursor.getColumnIndexOrThrow("album")
+        val duration = cursor.getColumnIndexOrThrow("duration")
+        val year = cursor.getColumnIndexOrThrow("year")
+        val addedAt = cursor.getColumnIndexOrThrow("added_at")
+        val liked = cursor.getColumnIndexOrThrow("liked")
+        val playCount = cursor.getColumnIndexOrThrow("play_count")
+        val lastPlayed = cursor.getColumnIndexOrThrow("last_played")
+        val hasCover = cursor.getColumnIndexOrThrow("has_cover")
+        val format = cursor.getColumnIndexOrThrow("format")
+        val bitrate = cursor.getColumnIndexOrThrow("bitrate")
+        val fileSize = cursor.getColumnIndexOrThrow("file_size")
+        val mtimeUnix = cursor.getColumnIndexOrThrow("mtime_unix")
+        val updatedAt = cursor.getColumnIndexOrThrow("updated_at")
+        val genre = cursor.getColumnIndex("genre")
+        val genreSource = cursor.getColumnIndex("genre_source")
+    }
+
+    private fun cursorToTrack(cursor: Cursor, cols: TrackCursorCols = TrackCursorCols(cursor)): Track {
+        val id = cursor.getString(cols.id)
+        val ytId = cursor.getString(cols.ytId)
+        val rootKey = cursor.getString(cols.rootKey)
+        val relPath = cursor.getString(cols.relPath)
+        val title = cursor.getString(cols.title)
+        val artist = cursor.getString(cols.artist)
+        val album = cursor.getString(cols.album)
+        val duration = cursor.getDouble(cols.duration)
+        val year = cursor.getInt(cols.year)
+        val addedAt = cursor.getLong(cols.addedAt)
+        val liked = cursor.getInt(cols.liked) != 0
+        val playCount = cursor.getInt(cols.playCount)
+        val lastPlayed = cursor.getLong(cols.lastPlayed)
+        val hasCover = cursor.getInt(cols.hasCover) != 0
+        val format = cursor.getString(cols.format)
+        val bitrate = cursor.getInt(cols.bitrate)
+        val fileSize = cursor.getLong(cols.fileSize)
+        val mtimeUnix = cursor.getLong(cols.mtimeUnix)
+        val updatedAt = cursor.getLong(cols.updatedAt)
+        val genre = if (cols.genre >= 0) cursor.getString(cols.genre).orEmpty() else ""
+        val genreSource = if (cols.genreSource >= 0) cursor.getString(cols.genreSource).orEmpty() else ""
 
         val track = Track(
             id = id,
@@ -218,7 +297,9 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
             bitrate = bitrate,
             fileSize = fileSize,
             mtimeUnix = mtimeUnix,
-            updatedAt = updatedAt
+            updatedAt = updatedAt,
+            genre = genre,
+            genreSource = genreSource
         )
         track.resolvedPath = resolvePath(rootKey, relPath)
         return track
@@ -227,8 +308,9 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
     fun getAllTracks(includeHidden: Boolean = false): List<Track> {
         val list = mutableListOf<Track>()
         readableDatabase.rawQuery("SELECT * FROM tracks ORDER BY added_at DESC, id DESC", null).use { cursor ->
+            val cols = TrackCursorCols(cursor)
             while (cursor.moveToNext()) {
-                list.add(cursorToTrack(cursor))
+                list.add(cursorToTrack(cursor, cols))
             }
         }
         if (!includeHidden) {
@@ -325,9 +407,11 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
             var pLiked = if (t.liked) 1 else 0
             var pPlays = t.playCount
             var pLast = t.lastPlayed
+            var effGenre = t.genre
+            var effGenreSrc = t.genreSource
 
             db.rawQuery(
-                "SELECT id, added_at, liked, play_count, last_played FROM tracks WHERE root_key = ? AND rel_path = ? AND id <> ?",
+                "SELECT id, added_at, liked, play_count, last_played, genre, genre_source FROM tracks WHERE root_key = ? AND rel_path = ? AND id <> ?",
                 arrayOf(t.rootKey, rel, t.id)
             ).use { cur ->
                 if (cur.moveToNext()) {
@@ -336,7 +420,16 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
                     pLiked = cur.getInt(2)
                     pPlays = cur.getInt(3)
                     pLast = cur.getLong(4)
+                    val pGenre = cur.getString(5).orEmpty()
+                    val pGenreSrc = cur.getString(6).orEmpty()
+                    if (effGenre.isEmpty() && pGenre.isNotEmpty()) {
+                        effGenre = pGenre
+                        effGenreSrc = pGenreSrc
+                    }
                 }
+            }
+            if (effGenre.isNotEmpty() && effGenreSrc.isEmpty()) {
+                effGenreSrc = "tag"
             }
 
             if (prevId != null) {
@@ -347,14 +440,16 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
                 INSERT INTO tracks(
                   id, yt_id, root_key, rel_path, title, artist, album, duration, year,
                   added_at, liked, play_count, last_played, has_cover, format, bitrate,
-                  file_size, mtime_unix, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  file_size, mtime_unix, updated_at, genre, genre_source
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   yt_id=excluded.yt_id, root_key=excluded.root_key, rel_path=excluded.rel_path,
                   title=excluded.title, artist=excluded.artist, album=excluded.album,
                   duration=excluded.duration, year=excluded.year, has_cover=excluded.has_cover,
                   format=excluded.format, bitrate=excluded.bitrate, file_size=excluded.file_size,
-                  mtime_unix=excluded.mtime_unix, updated_at=excluded.updated_at
+                  mtime_unix=excluded.mtime_unix, updated_at=excluded.updated_at,
+                  genre=CASE WHEN tracks.genre_source='user' THEN tracks.genre WHEN excluded.genre<>'' THEN excluded.genre ELSE tracks.genre END,
+                  genre_source=CASE WHEN tracks.genre_source='user' THEN 'user' WHEN excluded.genre<>'' THEN excluded.genre_source ELSE tracks.genre_source END
             """.trimIndent()
 
             db.execSQL(
@@ -378,7 +473,9 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
                     t.bitrate,
                     t.fileSize,
                     t.mtimeUnix,
-                    now
+                    now,
+                    effGenre,
+                    effGenreSrc
                 )
             )
 
@@ -511,39 +608,61 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
 
         readableDatabase.rawQuery(sql, null).use { cursor ->
             while (cursor.moveToNext()) {
-                val id = cursor.getLong(0)
-                val name = cursor.getString(1)
-                val createdAt = cursor.getLong(2)
-                val lastPlayed = cursor.getLong(3)
-                val count = cursor.getInt(4)
-                val duration = cursor.getDouble(5)
-
-                // Covers (up to 4 for mosaic)
-                val covers = mutableListOf<String>()
-                readableDatabase.rawQuery(
-                    """
-                    SELECT t.id FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id
-                    WHERE pt.playlist_id = ? AND t.has_cover = 1
-                    ORDER BY pt.position LIMIT 4
-                    """.trimIndent(),
-                    arrayOf(id.toString())
-                ).use { c2 ->
-                    while (c2.moveToNext()) {
-                        covers.add(c2.getString(0))
-                    }
-                }
-
                 list.add(
                     Playlist(
-                        id = id,
-                        name = name,
-                        createdAt = createdAt,
-                        lastPlayed = lastPlayed,
-                        trackCount = count,
-                        duration = duration,
-                        coverTracks = covers
+                        id = cursor.getLong(0),
+                        name = cursor.getString(1),
+                        createdAt = cursor.getLong(2),
+                        lastPlayed = cursor.getLong(3),
+                        trackCount = cursor.getInt(4),
+                        duration = cursor.getDouble(5),
+                        coverTracks = emptyList()
                     )
                 )
+            }
+        }
+        if (list.isEmpty()) return list
+
+        val coverMap = HashMap<Long, MutableList<String>>()
+        readableDatabase.rawQuery(
+            """
+            SELECT pt.playlist_id, pt.track_id
+            FROM playlist_tracks pt
+            JOIN tracks t ON t.id = pt.track_id
+            WHERE t.has_cover = 1
+            ORDER BY pt.playlist_id, pt.position
+            """.trimIndent(),
+            null
+        ).use { c2 ->
+            while (c2.moveToNext()) {
+                val pid = c2.getLong(0)
+                val covers = coverMap.getOrPut(pid) { mutableListOf() }
+                if (covers.size < 4) {
+                    covers.add(c2.getString(1))
+                }
+            }
+        }
+
+        return list.map { pl ->
+            val covers = coverMap[pl.id]
+            if (covers != null) pl.copy(coverTracks = covers) else pl
+        }
+    }
+
+    fun getPlaylistTracks(playlistId: Long): List<Track> {
+        val list = mutableListOf<Track>()
+        readableDatabase.rawQuery(
+            """
+            SELECT t.* FROM playlist_tracks pt
+            JOIN tracks t ON t.id = pt.track_id
+            WHERE pt.playlist_id = ?
+            ORDER BY pt.position
+            """.trimIndent(),
+            arrayOf(playlistId.toString())
+        ).use { cursor ->
+            val cols = TrackCursorCols(cursor)
+            while (cursor.moveToNext()) {
+                list.add(cursorToTrack(cursor, cols))
             }
         }
         return list
@@ -693,6 +812,23 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
 
             val enableOnlineFeatures = obj.optBoolean("enableOnlineFeatures", true)
 
+            val aiObj = obj.optJSONObject("ai")
+            val aiSettings = if (aiObj != null) {
+                AiGenreSettings(
+                    enabled = aiObj.optBoolean("enabled", false),
+                    autoOnNew = aiObj.optBoolean("autoOnNew", false),
+                    provider = aiObj.optString("provider", "gemini").ifBlank { "gemini" },
+                    baseUrl = aiObj.optString("baseUrl", ""),
+                    apiKey = aiObj.optString("apiKey", ""),
+                    model = aiObj.optString("model", ""),
+                    allowCustomGenres = aiObj.optBoolean("allowCustomGenres", false),
+                    webSearch = aiObj.optBoolean("webSearch", true),
+                    geminiGrounding = aiObj.optBoolean("geminiGrounding", false)
+                )
+            } else {
+                AiGenreSettings()
+            }
+
             AppSettings(
                 musicDirs = musicDirs,
                 downloadDir = downloadDir,
@@ -709,7 +845,8 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
                 autoUpdateYtdlp = autoUpdateYtdlp,
                 homeOrder = homeOrder,
                 homeHidden = homeHidden,
-                enableOnlineFeatures = enableOnlineFeatures
+                enableOnlineFeatures = enableOnlineFeatures,
+                ai = aiSettings
             )
         } catch (e: Exception) {
             AppSettings()
@@ -718,6 +855,17 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
 
     @Synchronized
     fun saveSettings(settings: AppSettings) {
+        val aiJson = JSONObject().apply {
+            put("enabled", settings.ai.enabled)
+            put("autoOnNew", settings.ai.autoOnNew)
+            put("provider", settings.ai.provider)
+            put("baseUrl", settings.ai.baseUrl)
+            put("apiKey", settings.ai.apiKey)
+            put("model", settings.ai.model)
+            put("allowCustomGenres", settings.ai.allowCustomGenres)
+            put("webSearch", settings.ai.webSearch)
+            put("geminiGrounding", settings.ai.geminiGrounding)
+        }
         val obj = JSONObject().apply {
             put("musicDirs", JSONArray(settings.musicDirs))
             put("downloadDir", settings.downloadDir)
@@ -735,6 +883,7 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
             put("homeOrder", JSONArray(settings.homeOrder))
             put("homeHidden", JSONArray(settings.homeHidden.toList()))
             put("enableOnlineFeatures", settings.enableOnlineFeatures)
+            put("ai", aiJson)
         }
         val cv = ContentValues().apply {
             put("key", "settings")
@@ -1021,8 +1170,215 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         return createPlaylist(plName, resolvedTrackIds)
     }
 
+    // -------------------------------------------------------------
+    // Genres, Artist Cache, Context Hints & Pending AI Run
+    // -------------------------------------------------------------
+
+    data class GenreCounts(
+        val total: Int = 0,
+        val identified: Int = 0,
+        val aiIdentified: Int = 0,
+        val unidentified: Int = 0,
+        val unchecked: Int = 0,
+        val missing: Int = 0,
+        val allAuto: Int = 0
+    )
+
+    fun getGenreCounts(): GenreCounts {
+        var total = 0
+        var identified = 0
+        var aiIdentified = 0
+        var unidentified = 0
+        var unchecked = 0
+        var missing = 0
+        var allAuto = 0
+        val sql = """
+            SELECT
+              COUNT(*),
+              SUM(CASE WHEN genre<>'' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN genre<>'' AND genre_source='ai' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN genre='' AND genre_source='none' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN genre='' AND genre_source='' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN genre='' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN genre_source NOT IN ('user','tag') THEN 1 ELSE 0 END)
+            FROM tracks
+        """.trimIndent()
+        readableDatabase.rawQuery(sql, null).use { c ->
+            if (c.moveToNext()) {
+                total = c.getInt(0)
+                identified = if (c.isNull(1)) 0 else c.getInt(1)
+                aiIdentified = if (c.isNull(2)) 0 else c.getInt(2)
+                unidentified = if (c.isNull(3)) 0 else c.getInt(3)
+                unchecked = if (c.isNull(4)) 0 else c.getInt(4)
+                missing = if (c.isNull(5)) 0 else c.getInt(5)
+                allAuto = if (c.isNull(6)) 0 else c.getInt(6)
+            }
+        }
+        return GenreCounts(total, identified, aiIdentified, unidentified, unchecked, missing, allAuto)
+    }
+
+    @Synchronized
+    fun setTracksGenre(ids: List<String>, genre: String, source: String) {
+        if (ids.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for (id in ids) {
+                db.execSQL(
+                    "UPDATE tracks SET genre = ?, genre_source = ? WHERE id = ?",
+                    arrayOf(genre, source, id)
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun setTrackGenresBatch(updates: Map<String, Pair<String, String>>) {
+        if (updates.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for ((id, gs) in updates) {
+                db.execSQL(
+                    "UPDATE tracks SET genre = ?, genre_source = ? WHERE id = ? AND genre_source <> 'user'",
+                    arrayOf(gs.first, gs.second, id)
+                )
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    @Synchronized
+    fun markUncheckedAsNone() {
+        writableDatabase.execSQL("UPDATE tracks SET genre_source = 'none' WHERE genre = '' AND genre_source = ''")
+    }
+
+    @Synchronized
+    fun setTrackUserGenres(trackId: String, genres: List<String>) {
+        val clean = GenreTaxonomy.cleanUserGenres(genres)
+        val joined = GenreTaxonomy.joinGenres(clean)
+        val src = if (clean.isEmpty()) "" else "user"
+        writableDatabase.execSQL(
+            "UPDATE tracks SET genre = ?, genre_source = ? WHERE id = ?",
+            arrayOf(joined, src, trackId)
+        )
+    }
+
+    @Synchronized
+    fun setArtistUserGenres(artistName: String, genres: List<String>) {
+        val clean = GenreTaxonomy.cleanUserGenres(genres)
+        val joined = GenreTaxonomy.joinGenres(clean)
+        val src = if (clean.isEmpty()) "" else "user"
+        val matchingIds = getAllTracks(includeHidden = true)
+            .filter { CanonicalKey.hasArtist(it.artist, artistName) || it.displayArtist.equals(artistName, ignoreCase = true) }
+            .map { it.id }
+        if (matchingIds.isEmpty()) return
+        setTracksGenre(matchingIds, joined, src)
+    }
+
+    @Synchronized
+    fun resetAutoGenres() {
+        val db = writableDatabase
+        db.execSQL("UPDATE tracks SET genre = '', genre_source = '' WHERE genre_source <> 'user'")
+        db.execSQL("DELETE FROM artist_genres")
+    }
+
+    fun getArtistGenres(artistKey: String): Triple<List<String>, Long, Boolean> {
+        readableDatabase.rawQuery(
+            "SELECT genre, checked_at FROM artist_genres WHERE artist_key = ? LIMIT 1",
+            arrayOf(artistKey)
+        ).use { c ->
+            if (c.moveToNext()) {
+                val g = c.getString(0).orEmpty()
+                val checkedAt = c.getLong(1)
+                return Triple(GenreTaxonomy.splitGenres(g), checkedAt, true)
+            }
+        }
+        return Triple(emptyList(), 0L, false)
+    }
+
+    @Synchronized
+    fun setArtistGenres(artistKey: String, genres: List<String>, source: String) {
+        val now = System.currentTimeMillis() / 1000
+        val cv = ContentValues().apply {
+            put("artist_key", artistKey)
+            put("genre", GenreTaxonomy.joinGenres(genres))
+            put("source", source)
+            put("checked_at", now)
+        }
+        writableDatabase.insertWithOnConflict("artist_genres", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getTrackContext(cacheKey: String): Pair<String, Long>? {
+        readableDatabase.rawQuery(
+            "SELECT hints, updated_at FROM track_context WHERE cache_key = ? LIMIT 1",
+            arrayOf(cacheKey)
+        ).use { c ->
+            if (c.moveToNext()) {
+                return Pair(c.getString(0).orEmpty(), c.getLong(1))
+            }
+        }
+        return null
+    }
+
+    @Synchronized
+    fun setTrackContext(cacheKey: String, hints: String) {
+        val now = System.currentTimeMillis() / 1000
+        val cv = ContentValues().apply {
+            put("cache_key", cacheKey)
+            put("hints", hints)
+            put("updated_at", now)
+        }
+        writableDatabase.insertWithOnConflict("track_context", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun loadPendingAiTracks(): List<String> {
+        var jsonStr: String? = null
+        readableDatabase.rawQuery(
+            "SELECT value FROM settings WHERE key = 'ai_genre_pending' LIMIT 1",
+            null
+        ).use { c ->
+            if (c.moveToNext()) jsonStr = c.getString(0)
+        }
+        if (jsonStr.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(jsonStr)
+            val list = ArrayList<String>(arr.length())
+            for (i in 0 until arr.length()) {
+                val id = arr.optString(i, "").trim()
+                if (id.isNotEmpty()) list.add(id)
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    @Synchronized
+    fun savePendingAiTracks(ids: List<String>) {
+        if (ids.isEmpty()) {
+            clearPendingAiTracks()
+            return
+        }
+        val cv = ContentValues().apply {
+            put("key", "ai_genre_pending")
+            put("value", JSONArray(ids).toString())
+        }
+        writableDatabase.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    @Synchronized
+    fun clearPendingAiTracks() {
+        writableDatabase.delete("settings", "key = ?", arrayOf("ai_genre_pending"))
+    }
+
     companion object {
         const val DATABASE_NAME = "library.db"
-        const val DATABASE_VERSION = 1
+        const val DATABASE_VERSION = 2
     }
 }

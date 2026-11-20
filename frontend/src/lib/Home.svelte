@@ -6,8 +6,8 @@
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu } from './menus'
-  import { buildQuickPicks, fmtTime, hasArtist, norm, splitArtists } from './util'
-  import type { DiscoverItem, Settings } from './types'
+  import { animateShelfScroll, attachShelfNav, buildQuickPicks, fallbackYtThumb, fmtTime, getShelfTargetLeft, norm, scrollShelfContainer, splitArtists } from './util'
+  import type { DiscoverItem, MenuItem, Settings, Track } from './types'
 
   const hour = new Date().getHours()
   const greeting = hour < 5 ? 'Late night vibes' : hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
@@ -30,11 +30,15 @@
   let showAllHomeTracks = $state(false)
   let dragSec = $state<string | null>(null)
   let dragOverSec = $state<string | null>(null)
+  const SHELF_INITIAL = 12
+  const SHELF_STEP = 12
+
   let qpSeed = $state(0)
   let qpCols = $state(36)
   let downloadingIds = $state<Record<string, boolean>>({})
   const shelfEls: Record<string, HTMLElement | undefined> = {}
   let shelfScrollState = $state<Record<string, { left: boolean; right: boolean }>>({})
+  let shelfShown = $state<Record<string, number>>({})
 
   const homeOrder = $derived.by(() => {
     const raw = core.settings?.homeOrder
@@ -61,7 +65,7 @@
   const visibleSections = $derived(homeOrder.filter((id) => !hiddenSet.has(id)))
   const movableVisible = $derived(visibleSections.filter((id) => id !== 'allMusic'))
 
-  const allQuickPicks = $derived(buildQuickPicks(core.tracks, qpSeed))
+  const allQuickPicks = $derived(buildQuickPicks(core.tracks, qpSeed, core.playlistTrackMap))
   const quickPickCount = $derived(qpCols)
   const visibleQuickPicks = $derived(allQuickPicks.slice(0, quickPickCount))
   const hasMoreQuickPicks = $derived(visibleQuickPicks.length < allQuickPicks.length)
@@ -104,7 +108,7 @@
   })
 
   $effect(() => {
-    if (!hiddenSet.has('discover') && core.discoverItems.length === 0 && !core.discoverLoading && core.tracks.length > 0) {
+    if (!hiddenSet.has('discover') && core.discoverItems.length === 0 && !core.discoverLoading && !core.discoverAttempted && core.tracks.length > 0) {
       core.fetchOnlineDiscover(false)
     }
   })
@@ -172,11 +176,33 @@
     dragOverSec = null
   }
 
+  function shelfTotal(secId: string): number {
+    switch (secId) {
+      case 'topTracks':
+        return mostPlayed.length
+      case 'quickPicks':
+        return visibleQuickPicks.length
+      case 'artistRadios':
+        return artistRadios.length
+      case 'discover':
+        return core.discoverItems.length
+      case 'recentlyAdded':
+        return recentlyAdded.length
+      default:
+        return 0
+    }
+  }
+
   function updateShelfState(secId: string) {
     const el = shelfEls[secId]
     if (!el) return
+    const total = shelfTotal(secId)
+    const shown = shelfShown[secId] ?? SHELF_INITIAL
+    if (shown < total && el.scrollLeft + el.clientWidth >= el.scrollWidth - 600) {
+      shelfShown = { ...shelfShown, [secId]: Math.min(total, shown + SHELF_STEP) }
+    }
     const left = el.scrollLeft > 2
-    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2 || shown < total
     const cur = shelfScrollState[secId]
     if (!cur || cur.left !== left || cur.right !== right) {
       shelfScrollState[secId] = { left, right }
@@ -184,39 +210,28 @@
   }
 
   function shelfNav(node: HTMLElement, secId: string) {
-    let currentId = secId
-    shelfEls[currentId] = node
-    const update = () => updateShelfState(currentId)
-    const ro = new ResizeObserver(update)
-    const mo = new MutationObserver(() => requestAnimationFrame(update))
-    node.addEventListener('scroll', update, { passive: true })
-    ro.observe(node)
-    mo.observe(node, { childList: true })
-    requestAnimationFrame(update)
-    return {
-      update(newId: string) {
-        if (newId !== currentId) {
-          if (shelfEls[currentId] === node) delete shelfEls[currentId]
-          currentId = newId
-          shelfEls[currentId] = node
-          requestAnimationFrame(update)
-        }
-      },
-      destroy() {
-        node.removeEventListener('scroll', update)
-        ro.disconnect()
-        mo.disconnect()
-        if (shelfEls[currentId] === node) delete shelfEls[currentId]
-      },
-    }
+    return attachShelfNav(node, secId, shelfEls, updateShelfState)
   }
 
-  function scrollShelf(secId: string, dir: -1 | 1) {
+  async function scrollShelf(secId: string, dir: -1 | 1) {
     const el = shelfEls[secId]
     if (!el) return
-    const cardStride = 186
-    const cardsPerPage = Math.max(1, Math.floor((el.clientWidth + 18) / cardStride))
-    el.scrollBy({ left: dir * cardsPerPage * cardStride, behavior: 'smooth' })
+    const total = shelfTotal(secId)
+    const shown = shelfShown[secId] ?? SHELF_INITIAL
+    if (dir === 1 && shown < total && getShelfTargetLeft(el) + el.clientWidth * 2 >= el.scrollWidth - 300) {
+      shelfShown = { ...shelfShown, [secId]: Math.min(total, shown + SHELF_STEP) }
+      await tick()
+    }
+    scrollShelfContainer(el, dir)
+  }
+
+  function quickPickMenu(t: Track): MenuItem[] {
+    return [
+      { label: 'Open mix', icon: 'library', action: () => core.go({ name: 'quickpick', id: t.id }) },
+      { label: 'Play mix', icon: 'play', action: () => core.startRadio(t) },
+      { separator: true },
+      ...trackMenu(t),
+    ]
   }
 
   function toggleHomeSection(id: string) {
@@ -228,8 +243,13 @@
 
   async function loadMoreQuickPicks() {
     qpCols += 12
+    const total = Math.min(allQuickPicks.length, qpCols)
+    const shown = shelfShown.quickPicks ?? SHELF_INITIAL
+    if (shown < total) {
+      shelfShown = { ...shelfShown, quickPicks: Math.min(total, Math.max(shown + 12, qpCols)) }
+    }
     await tick()
-    scrollShelf('quickPicks', 1)
+    await scrollShelf('quickPicks', 1)
   }
 
   async function downloadDiscover(d: DiscoverItem) {
@@ -362,11 +382,12 @@
   {/if}
 {/snippet}
 
-{#each visibleSections as sec (sec)}
+{#each visibleSections as sec, secIdx (sec)}
   {#if sec === 'recentPlaylists'}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="home-block"
+      class:below-fold={!editingLayout && secIdx >= 2}
       class:editing={editingLayout}
       class:sec-dragover={dragOverSec === 'recentPlaylists'}
       draggable={editingLayout}
@@ -386,7 +407,7 @@
           {#each recent as p (p.id)}
             {@const isPlPlaying = core.player.playlistId === p.id && core.player.playing}
             <div class="recent-card" class:playing={core.player.playlistId === p.id} role="button" tabindex="0" onclick={() => core.go({ name: 'playlist', id: p.id })} onkeydown={(e) => e.key === 'Enter' && core.go({ name: 'playlist', id: p.id })}>
-              <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" />
+              <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" size={128} />
               <div class="t">{p.name}</div>
               <button
                 class="play-fab"
@@ -412,6 +433,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
+        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'topTracks'}
         draggable={editingLayout}
@@ -434,7 +456,7 @@
           <div class="hint">Play some tracks and your most listened songs will appear here.</div>
         {:else}
           <div class="shelf" use:shelfNav={'topTracks'}>
-            {#each mostPlayed as t, i (t.id)}
+            {#each mostPlayed.slice(0, shelfShown.topTracks ?? SHELF_INITIAL) as t, i (t.id)}
               <Card
                 title={t.title}
                 sub={t.artist}
@@ -456,6 +478,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
+        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'quickPicks'}
         draggable={editingLayout}
@@ -467,7 +490,7 @@
         <div class="section-head">
           <div>
             <h2>Quick picks</h2>
-            <div class="hint" style="margin-top:2px">Click any song to start a local radio mix, or hover the cover to preview.</div>
+            <div class="hint" style="margin-top:2px">Click a card to open its mix, or press play to start the full radio mix.</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
             <button
@@ -476,7 +499,8 @@
               onclick={() => {
                 qpSeed++
                 qpCols = 36
-                shelfEls['quickPicks']?.scrollTo({ left: 0, behavior: 'smooth' })
+                shelfShown = { ...shelfShown, quickPicks: SHELF_INITIAL }
+                animateShelfScroll(shelfEls['quickPicks'], 0)
               }}
               title="Shuffle quick picks"
             >
@@ -498,16 +522,15 @@
           <div class="hint">Add or play some music and quick picks will appear here.</div>
         {:else}
           <div class="shelf" use:shelfNav={'quickPicks'}>
-            {#each visibleQuickPicks as t (t.id)}
+            {#each visibleQuickPicks.slice(0, shelfShown.quickPicks ?? SHELF_INITIAL) as t (t.id)}
               <Card
                 title={t.title}
                 sub={t.artist}
                 id={t.hasCover ? t.id : ''}
-                playing={core.player.trackId === t.id && core.player.playing}
-                onclick={() => core.startRadio(t)}
-                onplay={() => core.playInstant(t.id)}
-                onmore={(e) => core.openMenu(e, trackMenu(t))}
-                oncontext={(e) => core.openMenu(e, trackMenu(t))}
+                playing={core.isQuickPickPlaying(t.id)}
+                onclick={() => core.go({ name: 'quickpick', id: t.id })}
+                onplay={() => core.toggleQuickPick(t)}
+                onmore={(e) => core.openMenu(e, quickPickMenu(t))}
               />
             {/each}
           </div>
@@ -520,6 +543,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
+        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'artistRadios'}
         draggable={editingLayout}
@@ -544,8 +568,8 @@
           <div class="hint">Add or play some music and artist radio stations will appear here.</div>
         {:else}
           <div class="shelf" use:shelfNav={'artistRadios'}>
-            {#each artistRadios as ar (ar.name)}
-              {@const seedTrack = core.tracks.find((t) => hasArtist(t, ar.name))}
+            {#each artistRadios.slice(0, shelfShown.artistRadios ?? SHELF_INITIAL) as ar (ar.name)}
+              {@const seedTrack = core.byId.get(ar.trackIds[0])}
               <Card
                 title="{ar.name} Radio"
                 sub="{ar.count} local song{ar.count === 1 ? '' : 's'} + online mix"
@@ -567,6 +591,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="section home-block"
+      class:below-fold={!editingLayout && secIdx >= 2}
       class:editing={editingLayout}
       class:sec-dragover={dragOverSec === 'discover'}
       draggable={editingLayout}
@@ -603,19 +628,31 @@
           {@render reorderControls('discover')}
         </div>
       </div>
-      {#if core.discoverLoading && core.discoverItems.length === 0}
-        <div class="hint" style="padding:18px 0">Finding songs you might like from YouTube Music…</div>
+      {#if core.discoverItems.length === 0 && (core.discoverLoading || (!core.discoverAttempted && core.tracks.length > 0))}
+        <div class="shelf" aria-busy="true" aria-label="Loading online recommendations">
+          {#each [0, 1, 2, 3, 4, 5, 6, 7] as sk (sk)}
+            <div class="card discover-card skeleton-card" aria-hidden="true">
+              <div class="art discover-art skel-box"></div>
+              <div class="title skel-title"><span class="skel-bar"></span><span class="skel-bar short"></span></div>
+              <div class="sub skel-sub"><span class="skel-bar med"></span><span class="skel-bar short"></span></div>
+              <button class="btn ghost discover-dl-btn skel-btn" disabled tabindex="-1">
+                <Icon name="download" size={15} />
+                Loading…
+              </button>
+            </div>
+          {/each}
+        </div>
       {:else if core.discoverItems.length === 0}
         <div class="hint" style="padding:18px 0">
           No online suggestions loaded yet. Click <b>Refresh</b> to fetch recommendations from your library tracks.
         </div>
       {:else}
-        <div class="shelf" use:shelfNav={'discover'}>
-          {#each core.discoverItems as d (d.videoId)}
+        <div class="shelf" class:discover-busy={core.discoverLoading} use:shelfNav={'discover'}>
+          {#each core.discoverItems.slice(0, shelfShown.discover ?? SHELF_INITIAL) as d (d.videoId)}
             <div class="card discover-card">
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
               <div class="art discover-art" onclick={() => openExternal(d.url)} title="Try out in browser (YouTube)">
-                <img src={d.thumbUrl} alt="" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block" />
+                <img src={d.thumbUrl} alt="" loading="lazy" decoding="async" width="480" height="480" onload={fallbackYtThumb} onerror={fallbackYtThumb} style="width:100%;height:100%;object-fit:cover;display:block" />
                 <div class="discover-try-overlay">
                   <div class="discover-try-pill">
                     <Icon name="external" size={16} />
@@ -624,7 +661,7 @@
                 </div>
               </div>
               <div class="title" title={d.title}>{d.title}</div>
-              <div class="sub">{d.artist}{d.duration > 0 ? ` · ${fmtTime(d.duration)}` : ''}</div>
+              <div class="sub" title={`${d.artist}${d.duration > 0 ? ` · ${fmtTime(d.duration)}` : ''}`}>{d.artist}{d.duration > 0 ? ` · ${fmtTime(d.duration)}` : ''}</div>
               <button
                 class="btn ghost discover-dl-btn"
                 disabled={!!downloadingIds[d.videoId]}
@@ -644,6 +681,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
+        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'recentlyAdded'}
         draggable={editingLayout}
@@ -663,7 +701,7 @@
           </div>
         </div>
         <div class="shelf" use:shelfNav={'recentlyAdded'}>
-          {#each recentlyAdded as t, i (t.id)}
+          {#each recentlyAdded.slice(0, shelfShown.recentlyAdded ?? SHELF_INITIAL) as t, i (t.id)}
             <Card
               title={t.title}
               sub={t.artist}
@@ -680,7 +718,7 @@
     {/if}
 
   {:else if sec === 'allMusic'}
-    <div class="section home-block" class:editing={editingLayout}>
+    <div class="section home-block" class:below-fold={!editingLayout && secIdx >= 2} class:editing={editingLayout}>
       <div class="section-head">
         <h2>All your music <span style="color:var(--text-dim);font-weight:600;font-size:15px">· {core.tracks.length} songs</span></h2>
         <div style="display:flex;gap:10px;align-items:center">

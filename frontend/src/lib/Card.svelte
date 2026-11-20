@@ -52,10 +52,10 @@
         onclick={(e) => {
           e.stopPropagation()
           onplay?.()
-        }}><Icon name={playing ? 'pause' : 'play'} size={24} /></button
+        }}><Icon name={playing ? 'pause' : 'play'} size={26} /></button
       >
     {/if}
   </div>
-  <div class="title" class:playing>{title}</div>
-  {#if sub}<div class="sub">{sub}</div>{/if}
+  <div class="title" class:playing {title}>{title}</div>
+  {#if sub}<div class="sub" title={sub}>{sub}</div>{/if}
 </div>

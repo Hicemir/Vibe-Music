@@ -1,8 +1,9 @@
 import * as Go from '../../wailsjs/go/main/App'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { buildRadioMix } from './util'
+import { buildRadioMix, setGenreTaxonomy } from './util'
 import type {
   Track, Playlist, PlayerState, QueueEntry, Settings, DownloadJob, YtdlpStatus, YtMusicStatus, Route, MenuItem, DiscoverItem,
+  AIProviderPreset, LocalAIModel, LocalAIStatus, GenreStatus,
 } from './types'
 
 export { Go }
@@ -20,6 +21,8 @@ export type Modal =
   | { type: 'confirm'; title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void }
   | { type: 'sleep' }
   | { type: 'ytmImport' }
+  | { type: 'genre'; trackIds: string[]; label: string; current: string[] }
+  | { type: 'movePrompt'; newPrimary: string; others: string[]; nextDirs: string[] }
 
 class Core {
   tracks = $state.raw<Track[]>([])
@@ -27,10 +30,14 @@ class Core {
   playlists = $state.raw<Playlist[]>([])
   playlistTrackMap = $state.raw<Record<number, string[]>>({})
   player = $state.raw<PlayerState>(emptyPlayer)
+  position = $state(0)
+  duration = $state(0)
   queue = $state.raw<QueueEntry[]>([])
   radioSeed = $state.raw<{ trackId: string; mode: 'all' | 'familiar' | 'rediscover' | 'artist' } | null>(null)
+  quickPickSeeds = $state.raw<Record<string, number>>({})
   discoverItems = $state.raw<DiscoverItem[]>([])
   discoverLoading = $state(false)
+  discoverAttempted = $state(false)
   discoverSeed = $state(0)
   settings = $state.raw<Settings | null>(null)
   downloads = $state.raw<DownloadJob[]>([])
@@ -38,8 +45,22 @@ class Core {
   ytm = $state.raw<YtMusicStatus>({ loggedIn: false, syncing: false, message: '' })
   ytmPendingAction = $state<'import' | 'sync' | null>(null)
   scan = $state.raw({ scanning: false, done: 0, total: 0 })
+  genreStatus = $state.raw<GenreStatus>({
+    running: false, mode: '', phase: '', done: 0, total: 0,
+    identified: 0, aiIdentified: 0, unidentified: 0, unchecked: 0, pendingAI: 0,
+    message: '', error: '',
+  })
+  genreTax = $state.raw<{ name: string; parent: string }[]>([])
+  aiProviders = $state.raw<AIProviderPreset[]>([])
+  localAIModels = $state.raw<LocalAIModel[]>([])
+  localAI = $state.raw<LocalAIStatus>({
+    runtimeReady: false, runtimeVersion: '', runtimeVariant: '', vulkanAvail: false,
+    installedModels: [], diskUsageBytes: 0, state: 'idle', phase: '', percent: 0,
+    downloadedBytes: 0, totalBytes: 0, message: '', error: '',
+  })
+  moveStatus = $state.raw({ running: false, done: 0, total: 0, moved: 0, skipped: 0, failed: 0, message: '' })
   loaded = $state(false)
-  version = $state('0.5.0')
+  version = $state('0.6.2')
   windowMaximised = $state(true)
   coverExpanded = $state(false)
 
@@ -100,6 +121,7 @@ class Core {
     } catch {
     } finally {
       this.discoverLoading = false
+      this.discoverAttempted = true
     }
   }
 
@@ -214,8 +236,51 @@ class Core {
     const ids = this.tracks.filter((t) => t.liked).map((t) => t.id)
     this.play(ids, -1, { playlistId: -1 })
   }
+  getQuickPickSeed(trackId: string): number {
+    return this.quickPickSeeds[trackId] ?? 0
+  }
+  getQuickPickMix(seedTrack: Track, mode: 'all' | 'familiar' | 'rediscover' | 'artist' = 'all'): Track[] {
+    return buildRadioMix(
+      seedTrack,
+      this.tracks,
+      this.playlistTrackMap,
+      mode,
+      25,
+      mode === 'artist' ? 0 : this.getQuickPickSeed(seedTrack.id),
+    )
+  }
+  isQuickPickActive(trackId: string): boolean {
+    return (
+      this.radioSeed?.trackId === trackId &&
+      this.player.queueLen > 0 &&
+      this.queue[this.player.queueIndex]?.tid === this.player.trackId
+    )
+  }
+  isQuickPickPlaying(trackId: string): boolean {
+    return this.player.playing && this.isQuickPickActive(trackId)
+  }
+  toggleQuickPick(seedTrack: Track) {
+    if (this.isQuickPickActive(seedTrack.id)) {
+      if (this.player.playing) Go.Pause()
+      else Go.Resume()
+      return
+    }
+    this.startRadio(seedTrack, 'all')
+  }
+  refreshQuickPickMix(trackId: string) {
+    this.quickPickSeeds = { ...this.quickPickSeeds, [trackId]: (this.quickPickSeeds[trackId] ?? 0) + 1 }
+    const seedTrack = this.byId.get(trackId)
+    if (seedTrack && this.radioSeed?.trackId === trackId && this.player.queueLen > 0) {
+      const mix = this.getQuickPickMix(seedTrack, this.radioSeed.mode)
+      const curId = this.player.trackId || seedTrack.id
+      const upcomingIds = mix.map((x) => x.id).filter((id) => id !== curId)
+      Go.ClearQueue()
+      if (upcomingIds.length > 0) Go.AddToQueue(upcomingIds)
+    }
+    this.toast(seedTrack ? `Refreshed “${seedTrack.title}” mix` : 'Refreshed Quick Pick mix')
+  }
   startRadio(seedTrack: Track, mode: 'all' | 'familiar' | 'rediscover' | 'artist' = 'all') {
-    const mix = buildRadioMix(seedTrack, this.tracks, this.playlistTrackMap, mode, 25)
+    const mix = this.getQuickPickMix(seedTrack, mode)
     this.radioSeed = { trackId: seedTrack.id, mode }
     this.play(
       mix.map((x) => x.id),
@@ -229,7 +294,7 @@ class Core {
     const seedTrack = this.byId.get(this.radioSeed.trackId) ?? this.current
     if (!seedTrack) return
     this.radioSeed = { trackId: seedTrack.id, mode }
-    const mix = buildRadioMix(seedTrack, this.tracks, this.playlistTrackMap, mode, 25)
+    const mix = this.getQuickPickMix(seedTrack, mode)
     const curId = this.player.trackId || seedTrack.id
     const upcomingIds = mix.map((x) => x.id).filter((id) => id !== curId)
     Go.ClearQueue()
@@ -355,18 +420,55 @@ class Core {
     }
   }
 
+  lastMediaTrackId = ''
+  lastMediaPlaybackState: MediaSessionPlaybackState = 'none'
+
+  applyPlayerState(s: PlayerState) {
+    this.position = s.position
+    this.duration = s.duration
+    const prev = this.player
+    const structuralChanged =
+      prev.trackId !== s.trackId ||
+      prev.playlistId !== s.playlistId ||
+      prev.playing !== s.playing ||
+      prev.loaded !== s.loaded ||
+      prev.volume !== s.volume ||
+      prev.muted !== s.muted ||
+      prev.shuffle !== s.shuffle ||
+      prev.repeat !== s.repeat ||
+      prev.queueIndex !== s.queueIndex ||
+      prev.queueLen !== s.queueLen ||
+      prev.hasNext !== s.hasNext ||
+      prev.hasPrev !== s.hasPrev ||
+      prev.sleepAt !== s.sleepAt ||
+      prev.sleepEnd !== s.sleepEnd
+    if (structuralChanged) {
+      this.player = s
+      this.updateMediaSession(s)
+    }
+  }
+
   updateMediaSession(s: PlayerState) {
     if (!('mediaSession' in navigator)) return
     const ms = navigator.mediaSession
-    ms.playbackState = s.playing && s.loaded ? 'playing' : s.loaded ? 'paused' : 'none'
-    const tr = this.byId.get(s.trackId)
-    if (tr && typeof MediaMetadata !== 'undefined') {
-      ms.metadata = new MediaMetadata({
-        title: tr.title,
-        artist: tr.artist,
-        album: tr.album,
-        artwork: tr.hasCover ? [{ src: `/cover/${tr.id}`, sizes: '512x512', type: 'image/jpeg' }] : [],
-      })
+    const nextState: MediaSessionPlaybackState = s.playing && s.loaded ? 'playing' : s.loaded ? 'paused' : 'none'
+    if (nextState !== this.lastMediaPlaybackState) {
+      ms.playbackState = nextState
+      this.lastMediaPlaybackState = nextState
+    }
+    if (s.trackId !== this.lastMediaTrackId) {
+      const tr = this.byId.get(s.trackId)
+      if (!s.trackId || tr) {
+        this.lastMediaTrackId = s.trackId
+      }
+      if (tr && typeof MediaMetadata !== 'undefined') {
+        ms.metadata = new MediaMetadata({
+          title: tr.title,
+          artist: tr.artist,
+          album: tr.album,
+          artwork: tr.hasCover ? [{ src: `/cover/${tr.id}?s=360`, sizes: '360x360', type: 'image/jpeg' }] : [],
+        })
+      }
     }
   }
 
@@ -377,10 +479,7 @@ class Core {
     EventsOn('nav:forward', () => this.forward())
     EventsOn('window:maximised', (m: boolean) => (this.windowMaximised = m))
     EventsOn('webplayer:cmd', (msg: any) => this.handleWebPlayerCmd(msg))
-    EventsOn('player:state', (s: PlayerState) => {
-      this.player = s
-      this.updateMediaSession(s)
-    })
+    EventsOn('player:state', (s: PlayerState) => this.applyPlayerState(s))
     if ('mediaSession' in navigator) {
       try {
         navigator.mediaSession.setActionHandler('play', () => Go.Resume())
@@ -394,6 +493,9 @@ class Core {
     }
     EventsOn('player:queue', (q: { items: QueueEntry[] | null; index: number }) => (this.queue = q.items ?? []))
     EventsOn('library:scan', (s: { scanning: boolean; done: number; total: number }) => (this.scan = s))
+    EventsOn('genres:status', (s: GenreStatus) => (this.genreStatus = s))
+    EventsOn('ai:local:status', (s: LocalAIStatus) => (this.localAI = s))
+    EventsOn('library:move', (s: typeof this.moveStatus) => (this.moveStatus = s))
     EventsOn('settings:changed', (s: Settings) => (this.settings = s))
     EventsOn('app:toast', (t: string) => this.toast(t))
     EventsOn('ytdlp:status', (s: YtdlpStatus) => (this.ytdlp = s))
@@ -429,18 +531,47 @@ class Core {
     })
     EventsOn('download:cleared', async () => (this.downloads = ((await Go.GetDownloads()) as unknown as DownloadJob[]) ?? []))
 
-    await Promise.all([this.loadTracks(), this.loadPlaylists()])
-    this.settings = (await Go.GetSettings()) as unknown as Settings
-    this.player = (await Go.GetPlayerState()) as unknown as PlayerState
-    const q = (await Go.GetQueue()) as unknown as { items: QueueEntry[] | null }
+    const genreInit = (async () => {
+      try {
+        const [tax, genreStatus, aiProviders, localAIModels, localAI] = await Promise.all([
+          Go.GetGenreTaxonomy() as unknown as Promise<{
+            nodes: { name: string; parent: string }[]
+            links: { a: string; b: string; w: number }[]
+            clashes?: { a: string; b: string; w: number }[]
+          }>,
+          Go.GetGenreStatus() as unknown as Promise<GenreStatus>,
+          Go.GetAIProviders() as unknown as Promise<AIProviderPreset[]>,
+          Go.GetLocalAIModels() as unknown as Promise<LocalAIModel[]>,
+          Go.GetLocalAIStatus() as unknown as Promise<LocalAIStatus>,
+        ])
+        setGenreTaxonomy(tax.nodes ?? [], tax.links ?? [], tax.clashes ?? [])
+        this.genreTax = tax.nodes ?? []
+        this.genreStatus = genreStatus
+        this.aiProviders = aiProviders ?? []
+        this.localAIModels = localAIModels ?? []
+        this.localAI = localAI
+      } catch {}
+    })()
+
+    const [, , settings, playerState, q, downloads, ytdlp, ytm, ver] = await Promise.all([
+      this.loadTracks(),
+      this.loadPlaylists(),
+      Go.GetSettings() as unknown as Promise<Settings>,
+      Go.GetPlayerState() as unknown as Promise<PlayerState>,
+      Go.GetQueue() as unknown as Promise<{ items: QueueEntry[] | null }>,
+      Go.GetDownloads() as unknown as Promise<DownloadJob[]>,
+      Go.GetYtdlpStatus() as unknown as Promise<YtdlpStatus>,
+      Go.GetYtMusicStatus() as unknown as Promise<YtMusicStatus>,
+      Go.GetVersion().catch(() => ''),
+      genreInit,
+    ])
+    this.settings = settings
+    this.applyPlayerState(playerState)
     this.queue = q.items ?? []
-    this.downloads = ((await Go.GetDownloads()) as unknown as DownloadJob[]) ?? []
-    this.ytdlp = (await Go.GetYtdlpStatus()) as unknown as YtdlpStatus
-    this.ytm = (await Go.GetYtMusicStatus()) as unknown as YtMusicStatus
-    try {
-      const v = await Go.GetVersion()
-      if (v) this.version = v
-    } catch {}
+    this.downloads = downloads ?? []
+    this.ytdlp = ytdlp
+    this.ytm = ytm
+    if (ver) this.version = ver
     this.loaded = true
   }
 }

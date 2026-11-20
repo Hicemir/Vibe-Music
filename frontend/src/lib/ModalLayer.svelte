@@ -9,6 +9,34 @@
   let name = $state('')
   let lastKey = ''
 
+  let genreSel = $state<string[]>([])
+  let genreCustom = $state('')
+  const genreTops = $derived(core.genreTax.filter((n) => !n.parent))
+  const genreKids = (p: string) => core.genreTax.filter((n) => n.parent === p)
+  function toggleGenre(g: string) {
+    genreSel = genreSel.includes(g) ? genreSel.filter((x) => x !== g) : [...genreSel, g]
+  }
+  function addCustomGenre() {
+    const g = genreCustom.trim()
+    if (g && !genreSel.includes(g)) genreSel = [...genreSel, g]
+    genreCustom = ''
+  }
+  async function saveGenres(clear = false) {
+    if (m?.type !== 'genre') return
+    const ids = m.trackIds
+    const list = clear ? [] : genreSel
+    close()
+    await Go.SetTracksGenre(ids, list)
+    core.toast(list.length ? `Genres set: ${list.join(', ')}` : 'Genres cleared — they will be detected again')
+  }
+  async function movePrimary(move: boolean) {
+    if (m?.type !== 'movePrompt') return
+    const { newPrimary, others, nextDirs } = m
+    close()
+    await Go.SaveSettings({ ...core.settings!, musicDirs: nextDirs, downloadDir: newPrimary } as never)
+    if (move && others.length) await Go.MoveMusic(others, newPrimary)
+  }
+
   let ytmLoading = $state(false)
   let ytmError = $state('')
   let ytmCollections = $state.raw<YtMusicCollection[]>([])
@@ -98,6 +126,10 @@
       if (m?.type === 'ytmImport') {
         loadYtmLibrary()
       }
+      if (m?.type === 'genre') {
+        genreCustom = ''
+        genreSel = [...m.current]
+      }
     }
   })
 
@@ -151,7 +183,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="overlay" onclick={close}>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="modal" class:modal-wide={m.type === 'ytmImport'} onclick={(e) => e.stopPropagation()}>
+    <div class="modal" class:modal-wide={m.type === 'ytmImport' || m.type === 'genre'} onclick={(e) => e.stopPropagation()}>
       {#if m.type === 'newPlaylist'}
         <h3>New playlist</h3>
         <!-- svelte-ignore a11y_autofocus -->
@@ -176,7 +208,7 @@
           </button>
           {#each core.playlists as p (p.id)}
             <button onclick={() => addTo(p.id, p.name)}>
-              <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" />
+              <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" size={128} />
               <div><div style="font-weight:600">{p.name}</div><div class="hint">{p.trackCount} songs</div></div>
             </button>
           {/each}
@@ -219,6 +251,48 @@
           {/if}
         </div>
         <div class="row"><button class="btn ghost" onclick={close}>Close</button></div>
+      {:else if m.type === 'genre'}
+        <h3>Genres</h3>
+        <div class="hint" style="font-size:13px">
+          Pick one or more genres for {m.label}. A sub-genre also counts as its parent (Thrash Metal is also Metal and Rock). Hand-set genres are never changed by auto-detection.
+        </div>
+        {#if genreSel.length}
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin:6px 0">
+            {#each genreSel as g}<button class="chip on" onclick={() => toggleGenre(g)}>{g} ✕</button>{/each}
+          </div>
+        {/if}
+        <div class="list" style="max-height:340px;overflow:auto">
+          {#each genreTops as top}
+            <div style="margin:6px 0">
+              <button class="chip" class:on={genreSel.includes(top.name)} onclick={() => toggleGenre(top.name)}><b>{top.name}</b></button>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 0 14px">
+                {#each genreKids(top.name) as kid}
+                  <button class="chip" class:on={genreSel.includes(kid.name)} onclick={() => toggleGenre(kid.name)}>{kid.name}</button>
+                  {#each genreKids(kid.name) as sub}
+                    <button class="chip" class:on={genreSel.includes(sub.name)} onclick={() => toggleGenre(sub.name)}>{sub.name}</button>
+                  {/each}
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
+        <input class="pill-input" placeholder="Or add a custom genre and press Enter" bind:value={genreCustom} onkeydown={(e) => e.key === 'Enter' && addCustomGenre()} />
+        <div class="row">
+          <button class="btn ghost" onclick={() => saveGenres(true)}>Clear / auto-detect</button>
+          <button class="btn ghost" onclick={close}>Cancel</button>
+          <button class="btn primary" disabled={genreSel.length === 0} onclick={() => saveGenres()}>Save</button>
+        </div>
+      {:else if m.type === 'movePrompt'}
+        <h3>Move your music to the new primary folder?</h3>
+        <p class="hint" style="font-size:14px">
+          <b>{m.newPrimary}</b> will be your primary folder. Do you want to move the songs from your other folders into it now?
+          If you choose “No”, only new downloads go there and your existing files stay where they are (you can move them later from Settings).
+        </p>
+        <div class="row">
+          <button class="btn ghost" onclick={close}>Cancel</button>
+          <button class="btn ghost" onclick={() => movePrimary(false)}>No, only new downloads</button>
+          <button class="btn primary" onclick={() => movePrimary(true)}>Yes, move my music</button>
+        </div>
       {:else if m.type === 'ytmImport'}
         <div>
           <h3>Import from YouTube Music</h3>
@@ -262,7 +336,7 @@
                 </div>
                 <div class="ytm-col-thumb">
                   {#if col.thumbnailUrl}
-                    <img src={col.thumbnailUrl} alt="" loading="lazy" />
+                    <img src={col.thumbnailUrl} alt="" loading="lazy" decoding="async" />
                   {:else}
                     <Icon
                       name={col.type === 'LIKED_MUSIC' ? 'heart-fill' : col.type === 'ALBUM' ? 'album' : 'library'}

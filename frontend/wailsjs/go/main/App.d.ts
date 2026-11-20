@@ -12,19 +12,39 @@ export function BuildSapisidHashHeader(arg1:string):Promise<string>;
 
 export function CancelDownload(arg1:number):Promise<void>;
 
+export function CancelGenreDetection():Promise<void>;
+
+export function CancelLocalAIDownload():Promise<void>;
+
 export function ClearDownloads():Promise<void>;
+
+export function ClearPendingAI():Promise<void>;
 
 export function ClearQueue():Promise<void>;
 
 export function CloseWindow():Promise<void>;
 
+export function CountMovable(arg1:Array<string>,arg2:string):Promise<Array<number>>;
+
 export function CreatePlaylist(arg1:string,arg2:Array<string>):Promise<number>;
 
+export function DeleteAllLocalAI():Promise<string>;
+
+export function DeleteLocalModel(arg1:string):Promise<string>;
+
 export function DeletePlaylist(arg1:number):Promise<void>;
+
+export function DetectGenres():Promise<void>;
+
+export function DetectGenresAI(arg1:string):Promise<string>;
+
+export function DownloadLocalAI(arg1:string,arg2:boolean):Promise<string>;
 
 export function ExportPlaylist(arg1:number,arg2:string):Promise<string>;
 
 export function FetchYtMusicLibrary():Promise<main.YtMusicLibraryResponse>;
+
+export function GetAIProviders():Promise<Array<main.AIProviderPreset>>;
 
 export function GetAllPlaylistTracks():Promise<Record<number, Array<string>>>;
 
@@ -32,7 +52,19 @@ export function GetArtistOnlineDiscovery(arg1:string,arg2:number):Promise<Array<
 
 export function GetDownloads():Promise<Array<main.DownloadJob>>;
 
+export function GetGenreStatus():Promise<main.GenreStatus>;
+
+export function GetGenreTargets():Promise<main.GenreTargets>;
+
+export function GetGenreTaxonomy():Promise<main.GenreTaxonomy>;
+
+export function GetLocalAIModels():Promise<Array<main.LocalAIModel>>;
+
+export function GetLocalAIStatus():Promise<main.LocalAIStatus>;
+
 export function GetLyrics(arg1:string):Promise<main.Lyrics>;
+
+export function GetMoveStatus():Promise<main.MoveStatus>;
 
 export function GetOnlineDiscovery(arg1:number):Promise<Array<main.DiscoverItem>>;
 
@@ -68,6 +100,8 @@ export function MinimiseWindow():Promise<void>;
 
 export function MoveInQueue(arg1:number,arg2:number):Promise<void>;
 
+export function MoveMusic(arg1:Array<string>,arg2:string):Promise<void>;
+
 export function Next():Promise<void>;
 
 export function OnAudioEOF():Promise<void>;
@@ -86,6 +120,8 @@ export function Pause():Promise<void>;
 
 export function PickFolder():Promise<string>;
 
+export function PickGGUFFile():Promise<string>;
+
 export function PlayInstant(arg1:string):Promise<void>;
 
 export function PlayNext(arg1:Array<string>):Promise<void>;
@@ -97,6 +133,8 @@ export function PlayTracks(arg1:Array<string>,arg2:number,arg3:boolean,arg4:numb
 export function Previous():Promise<void>;
 
 export function QuitApp():Promise<void>;
+
+export function RedetectGenres():Promise<void>;
 
 export function RemoveFromQueue(arg1:number):Promise<void>;
 
@@ -122,6 +160,8 @@ export function SetShuffle(arg1:boolean):Promise<void>;
 
 export function SetSleepTimer(arg1:number):Promise<void>;
 
+export function SetTracksGenre(arg1:Array<string>,arg2:Array<string>):Promise<void>;
+
 export function SetVolume(arg1:number):Promise<void>;
 
 export function Settings():Promise<main.Settings>;
@@ -137,6 +177,8 @@ export function StartDownloadToPlaylist(arg1:string,arg2:number):Promise<string>
 export function StartYtMusicLogin():Promise<void>;
 
 export function SyncYtMusicLibrary():Promise<string>;
+
+export function TestAIConnection(arg1:main.AISettings):Promise<main.AITestResult>;
 
 export function ToggleLike(arg1:string):Promise<boolean>;
 

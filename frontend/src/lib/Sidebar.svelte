@@ -8,6 +8,7 @@
   const r = $derived(core.route)
   const t = $derived(core.current)
   const sorted = $derived(core.playlists.slice().sort((a, b) => Math.max(b.lastPlayed, b.createdAt) - Math.max(a.lastPlayed, a.createdAt)))
+  const likedCount = $derived(core.tracks.reduce((n, t) => n + (t.liked ? 1 : 0), 0))
 
   function active(...names: string[]) {
     return names.includes(r.name)
@@ -55,10 +56,10 @@
         onclick={() => core.go({ name: 'liked' })}
         onkeydown={(e) => e.key === 'Enter' && core.go({ name: 'liked' })}
       >
-        <Cover icon="heart-fill" class="thumb" />
+        <Cover icon="heart-fill" class="thumb" size={128} />
         <div class="meta">
           <div class="n">{'Liked Songs'}</div>
-          <div class="s">{core.tracks.filter((t) => t.liked).length} songs</div>
+          <div class="s">{likedCount} songs</div>
         </div>
         <button
           class="pl-play-btn"
@@ -85,7 +86,7 @@
           onclick={() => core.go({ name: 'playlist', id: p.id })}
           onkeydown={(e) => e.key === 'Enter' && core.go({ name: 'playlist', id: p.id })}
         >
-          <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" />
+          <Cover ids={p.coverTracks && p.coverTracks.length ? p.coverTracks : null} icon="library" class="thumb" size={128} />
           <div class="meta">
             <div class="n">{p.name}</div>
             <div class="s">{p.trackCount} songs</div>

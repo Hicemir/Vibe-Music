@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -668,10 +669,12 @@ class YtMusicClient(
 
     private fun fetchPlaylistsViaYtdlp(): List<YtMusicCollection> {
         val out = mutableListOf<YtMusicCollection>()
+        var tempCookie: File? = null
         try {
+            tempCookie = authManager.createTempCookiesFile()
             val req = YoutubeDLRequest("https://music.youtube.com/library/playlists")
-            if (authManager.cookiesFile.exists()) {
-                req.addOption("--cookies", authManager.cookiesFile.absolutePath)
+            if (tempCookie != null) {
+                req.addOption("--cookies", tempCookie.absolutePath)
             }
             req.addOption("--flat-playlist")
             req.addOption("-J")
@@ -702,6 +705,8 @@ class YtMusicClient(
             }
         } catch (e: Exception) {
             Log.w("YtMusicClient", "yt-dlp playlist discovery fallback failed: ${e.message}")
+        } finally {
+            try { tempCookie?.delete() } catch (_: Exception) {}
         }
         return out
     }
@@ -718,10 +723,12 @@ class YtMusicClient(
         }.distinct()
 
         for (targetUrl in candidateUrls) {
+            var tempCookie: File? = null
             try {
+                tempCookie = authManager.createTempCookiesFile()
                 val req = YoutubeDLRequest(targetUrl)
-                if (authManager.cookiesFile.exists()) {
-                    req.addOption("--cookies", authManager.cookiesFile.absolutePath)
+                if (tempCookie != null) {
+                    req.addOption("--cookies", tempCookie.absolutePath)
                 }
                 req.addOption("--flat-playlist")
                 req.addOption("-J")
@@ -761,6 +768,8 @@ class YtMusicClient(
                 if (out.isNotEmpty()) return out
             } catch (e: Exception) {
                 Log.w("YtMusicClient", "yt-dlp fallback track fetch failed for $targetUrl: ${e.message}")
+            } finally {
+                try { tempCookie?.delete() } catch (_: Exception) {}
             }
         }
         return emptyList()

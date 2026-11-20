@@ -4,6 +4,7 @@ import android.content.Context
 import android.webkit.CookieManager
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 
 class YtMusicAuthManager(private val context: Context) {
 
@@ -15,6 +16,7 @@ class YtMusicAuthManager(private val context: Context) {
 
     private val authCookieNames = setOf("SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID")
 
+    @Synchronized
     fun isLoggedIn(): Boolean {
         val webCookies = readWebViewCookiesMap()
         if (hasAuthCookie(webCookies)) {
@@ -26,6 +28,22 @@ class YtMusicAuthManager(private val context: Context) {
         return hasAuthCookieInCookiesFile()
     }
 
+    @Synchronized
+    fun createTempCookiesFile(targetDir: File? = null): File? {
+        if (!isLoggedIn()) return null
+        val src = cookiesFile
+        if (!src.exists() || src.length() == 0L) return null
+        return try {
+            val dir = (targetDir ?: context.cacheDir).apply { mkdirs() }
+            val dst = File(dir, "yt_cookies_${UUID.randomUUID()}.txt")
+            src.copyTo(dst, overwrite = true)
+            dst
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    @Synchronized
     fun extractAndSaveCookies(): Boolean {
         val cm = try {
             CookieManager.getInstance()
@@ -127,6 +145,7 @@ class YtMusicAuthManager(private val context: Context) {
         return parts.joinToString(" ")
     }
 
+    @Synchronized
     fun logout() {
         try {
             if (cookiesFile.exists()) cookiesFile.delete()

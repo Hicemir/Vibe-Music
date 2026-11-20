@@ -2,6 +2,7 @@ package com.vibemusic.nativeapp
 
 import android.app.Application
 import com.vibemusic.nativeapp.data.VibeStore
+import com.vibemusic.nativeapp.genre.GenreDetector
 import com.vibemusic.nativeapp.player.PlayerManager
 import com.vibemusic.nativeapp.scanner.LibraryScanner
 import com.vibemusic.nativeapp.ytdlp.YtdlpManager
@@ -20,6 +21,9 @@ class VibeApplication : Application() {
     lateinit var ytdlpManager: YtdlpManager
         private set
 
+    lateinit var genreDetector: GenreDetector
+        private set
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -28,6 +32,8 @@ class VibeApplication : Application() {
         scanner = LibraryScanner(this, store)
         playerManager = PlayerManager(this, store)
         ytdlpManager = YtdlpManager(this, store, scanner)
+        genreDetector = GenreDetector(store, scanner)
+        genreDetector.refreshStatus()
 
         // Initialize yt-dlp in background
         ytdlpManager.init()

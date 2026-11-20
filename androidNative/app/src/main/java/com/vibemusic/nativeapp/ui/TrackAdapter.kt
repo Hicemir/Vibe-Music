@@ -1,6 +1,5 @@
 package com.vibemusic.nativeapp.ui
 
-import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -10,6 +9,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.vibemusic.nativeapp.R
 import com.vibemusic.nativeapp.data.Track
@@ -27,15 +27,45 @@ class TrackAdapter(
     private var onFooterClick: (() -> Unit)? = null
 
     fun submitList(newList: List<Track>) {
+        val oldList = tracks.toList()
+        val hasFooter = footerText != null
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize(): Int = oldList.size + if (hasFooter) 1 else 0
+            override fun getNewListSize(): Int = newList.size + if (hasFooter) 1 else 0
+
+            override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                val oldIsFooter = hasFooter && oldItemPosition == oldList.size
+                val newIsFooter = hasFooter && newItemPosition == newList.size
+                if (oldIsFooter || newIsFooter) return oldIsFooter && newIsFooter
+                return oldList[oldItemPosition].id == newList[newItemPosition].id
+            }
+
+            override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+                val oldIsFooter = hasFooter && oldItemPosition == oldList.size
+                if (oldIsFooter) return true
+                return oldList[oldItemPosition] == newList[newItemPosition]
+            }
+        })
         tracks.clear()
         tracks.addAll(newList)
-        notifyDataSetChanged()
+        diff.dispatchUpdatesTo(this)
     }
 
     fun setFooterButton(text: String?, onClick: (() -> Unit)? = null) {
-        footerText = text
+        val oldText = footerText
         onFooterClick = onClick
-        notifyDataSetChanged()
+        if (oldText == text) {
+            if (text != null) {
+                notifyItemChanged(tracks.size)
+            }
+            return
+        }
+        footerText = text
+        when {
+            oldText == null && text != null -> notifyItemInserted(tracks.size)
+            oldText != null && text == null -> notifyItemRemoved(tracks.size)
+            else -> notifyItemChanged(tracks.size)
+        }
     }
 
     override fun getItemViewType(position: Int): Int {
@@ -88,18 +118,8 @@ class TrackAdapter(
         trackHolder.artist.text = track.displayArtist
         trackHolder.duration.text = track.formattedDuration()
 
-        // Load cover thumbnail
-        val coverFile = store.getCoverFile(track.id)
-        if (coverFile.exists() && coverFile.length() > 0) {
-            val bmp = BitmapFactory.decodeFile(coverFile.absolutePath)
-            if (bmp != null) {
-                trackHolder.cover.setImageBitmap(bmp)
-            } else {
-                trackHolder.cover.setImageResource(R.drawable.ic_music_note)
-            }
-        } else {
-            trackHolder.cover.setImageResource(R.drawable.ic_music_note)
-        }
+        // Load cover thumbnail asynchronously with in-memory LRU cache
+        CoverLoader.loadInto(trackHolder.cover, store, track.id, 192, R.drawable.ic_music_note)
 
         if (onAddClick != null) {
             trackHolder.btnAdd.visibility = View.VISIBLE

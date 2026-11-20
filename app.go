@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	wr "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -26,6 +27,8 @@ type App struct {
 	dl      *Downloader
 	mpris   *Mpris
 	tray    *Tray
+	localAI *LocalAIManager
+	genres  *GenreDetector
 
 	setMu sync.RWMutex
 	set   Settings
@@ -118,6 +121,10 @@ func (a *App) startup(ctx context.Context) {
 	a.reloadTracks()
 
 	a.scanner = NewScanner(st, a.emit)
+	a.localAI = NewLocalAIManager(a.emit)
+	a.genres = NewGenreDetector(a)
+	a.scanner.onChanged = func() { a.reloadTracks() }
+	a.scanner.onDone = a.genres.Kick
 	a.ytdlp = NewYtdlp(a.emit)
 	a.dl = NewDownloader(a)
 
@@ -144,8 +151,6 @@ func (a *App) startup(ctx context.Context) {
 	// library
 	go func() {
 		a.scanner.Scan(a.scanDirs())
-		a.reloadTracks()
-		a.emit("library:changed")
 		a.scanner.Watch(a.scanDirs())
 	}()
 	// yt-dlp auto update on every launch
@@ -172,6 +177,12 @@ func (a *App) beforeClose(ctx context.Context) bool {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.genres != nil {
+		a.genres.Cancel()
+	}
+	if a.localAI != nil {
+		a.localAI.Shutdown()
+	}
 	if a.player != nil {
 		a.player.Close()
 	}
@@ -210,7 +221,7 @@ func (a *App) CloseWindow() {
 }
 
 func (a *App) GetVersion() string {
-	return "0.5.0"
+	return "0.6.2"
 }
 
 func (a *App) OpenInBrowser(url string) {
@@ -244,12 +255,33 @@ func (a *App) GetTracks() []Track {
 	return list
 }
 
+// ingestFiles indexes just the given files (e.g. fresh downloads), refreshes the in-memory track map,
+// notifies the UI and kicks off genre detection. Falls back to a full scan if any file cannot be indexed.
+func (a *App) ingestFiles(files []string) {
+	dirs := a.scanDirs()
+	failed := false
+	for _, f := range files {
+		if t, ok := a.store.TrackByPath(f); ok {
+			if st, err := os.Stat(f); err == nil && st.ModTime().Unix() == t.MTime && st.Size() == t.Size {
+				continue
+			}
+		}
+		if !a.scanner.IngestFile(f, dirs) {
+			failed = true
+		}
+	}
+	if failed {
+		a.scanner.Scan(dirs)
+	}
+	a.reloadTracks()
+	a.emit("library:changed")
+	if a.genres != nil {
+		a.genres.Kick()
+	}
+}
+
 func (a *App) Rescan() {
-	go func() {
-		a.scanner.Scan(a.scanDirs())
-		a.reloadTracks()
-		a.emit("library:changed")
-	}()
+	go a.scanner.Scan(a.scanDirs())
 }
 
 func (a *App) ToggleLike(id string) bool {
@@ -633,9 +665,8 @@ func (a *App) SaveSettings(s Settings) Settings {
 	if len(s.MusicDirs) == 0 {
 		s.MusicDirs = defaultSettings().MusicDirs
 	}
-	if s.DownloadDir == "" {
-		s.DownloadDir = s.MusicDirs[0]
-	}
+	// The first music folder is the primary one and is where new downloads are stored.
+	s.DownloadDir = s.MusicDirs[0]
 	if len(s.HomeOrder) == 0 {
 		s.HomeOrder = old.HomeOrder
 	}
@@ -648,6 +679,18 @@ func (a *App) SaveSettings(s Settings) Settings {
 	s.WindowWidth = old.WindowWidth
 	s.WindowHeight = old.WindowHeight
 	s.WindowMaximised = old.WindowMaximised
+	s.AI.Provider = strings.TrimSpace(s.AI.Provider)
+	if s.AI.Provider == "" {
+		s.AI.Provider = "openai"
+	}
+	s.AI.BaseURL = strings.TrimSpace(s.AI.BaseURL)
+	s.AI.APIKey = strings.TrimSpace(s.AI.APIKey)
+	s.AI.Model = strings.TrimSpace(s.AI.Model)
+	s.AI.LocalModelID = strings.TrimSpace(s.AI.LocalModelID)
+	if s.AI.LocalModelID == "" {
+		s.AI.LocalModelID = "qwen2.5-3b"
+	}
+	s.AI.LocalCustomGGUF = strings.TrimSpace(s.AI.LocalCustomGGUF)
 	a.setMu.Lock()
 	a.set = s
 	a.setMu.Unlock()
@@ -667,6 +710,153 @@ func (a *App) SaveSettings(s Settings) Settings {
 		}()
 	}
 	return s
+}
+
+// ---------- genres ----------
+
+// GetGenreTaxonomy returns the genre tree (with parents and cousin links) used for similarity.
+func (a *App) GetGenreTaxonomy() GenreTaxonomy { return getGenreTaxonomy() }
+
+// SetTracksGenre sets (or clears, when empty) the genres of the given tracks by hand.
+// genres is a list of taxonomy names or custom text.
+func (a *App) SetTracksGenre(ids []string, genres []string) {
+	clean := cleanUserGenres(genres)
+	src := "user"
+	if len(clean) == 0 {
+		src = ""
+	}
+	if err := a.store.SetTracksGenre(ids, joinGenres(clean), src); err != nil {
+		return
+	}
+	a.reloadTracks()
+	a.emit("library:changed")
+	if len(clean) == 0 {
+		a.genres.Kick()
+	}
+}
+
+// RedetectGenres forgets all automatically detected genres (hand-set ones stay) and detects again.
+func (a *App) RedetectGenres() {
+	_ = a.store.ClearPendingAITracks()
+	a.store.ResetGenres()
+	a.reloadTracks()
+	a.emit("library:changed")
+	a.genres.KickClassic()
+}
+
+func (a *App) GetGenreStatus() GenreStatus { return a.genres.Status() }
+
+func (a *App) GetGenreTargets() GenreTargets { return a.genres.Targets() }
+
+// DetectGenres runs classic genre detection for tracks that have none (tags, same-artist, online lookup).
+func (a *App) DetectGenres() { a.genres.KickClassic() }
+
+func (a *App) DetectGenresAI(mode string) string { return a.genres.StartAI(mode) }
+
+func (a *App) CancelGenreDetection() {
+	if a.genres != nil {
+		a.genres.Cancel()
+	}
+}
+
+func (a *App) ClearPendingAI() {
+	if a.store != nil {
+		_ = a.store.ClearPendingAITracks()
+	}
+	if a.genres != nil {
+		a.emit("genres:status", a.genres.Status())
+	}
+}
+
+func (a *App) GetAIProviders() []AIProviderPreset { return GetAIProviders() }
+
+func (a *App) GetLocalAIModels() []LocalAIModel { return GetLocalAIModels() }
+
+func (a *App) GetLocalAIStatus() LocalAIStatus {
+	if a.localAI == nil {
+		return LocalAIStatus{InstalledModels: []string{}, State: "idle"}
+	}
+	return a.localAI.Status()
+}
+
+func (a *App) DownloadLocalAI(modelID string, useGPU bool) string {
+	if a.localAI == nil {
+		return "local AI manager is not initialized"
+	}
+	return a.localAI.Download(modelID, useGPU)
+}
+
+func (a *App) CancelLocalAIDownload() {
+	if a.localAI != nil {
+		a.localAI.CancelDownload()
+	}
+}
+
+func (a *App) DeleteLocalModel(modelID string) string {
+	if a.localAI == nil {
+		return "local AI manager is not initialized"
+	}
+	return a.localAI.DeleteModel(modelID)
+}
+
+func (a *App) DeleteAllLocalAI() string {
+	if a.localAI == nil {
+		return "local AI manager is not initialized"
+	}
+	return a.localAI.DeleteAll()
+}
+
+func (a *App) PickGGUFFile() string {
+	f, err := wr.OpenFileDialog(a.ctx, wr.OpenDialogOptions{
+		Title:   "Choose a GGUF model file",
+		Filters: []wr.FileFilter{{DisplayName: "GGUF Models (*.gguf)", Pattern: "*.gguf"}},
+	})
+	if err != nil {
+		return ""
+	}
+	return f
+}
+
+func (a *App) TestAIConnection(cfg AISettings) AITestResult {
+	if cfg.Provider == "local" {
+		if a.genres != nil && a.genres.Status().Running {
+			return AITestResult{OK: false, Message: "Wait for active genre detection to finish before testing local AI"}
+		}
+		if a.localAI == nil {
+			return AITestResult{OK: false, Message: "Local AI manager is not initialized"}
+		}
+		modelPath, err := a.localAI.ModelPath(cfg)
+		if err != nil {
+			return AITestResult{OK: false, Message: err.Error()}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		baseURL, err := a.localAI.Start(ctx, modelPath, cfg.LocalGPU)
+		if err != nil {
+			return AITestResult{OK: false, Message: err.Error()}
+		}
+		defer a.localAI.Stop()
+		p := newHTTPAIClient(resolvedAIConfig{
+			providerID: "local",
+			kind:       "openai",
+			baseURL:    baseURL,
+			model:      "local",
+		})
+		return testAIProvider(ctx, p)
+	}
+	rcfg, err := resolveAIConfig(cfg)
+	if err != nil {
+		return AITestResult{OK: false, Message: err.Error()}
+	}
+	return testAIProvider(context.Background(), newHTTPAIClient(rcfg))
+}
+
+// ---------- move music ----------
+
+// MoveMusic moves every track stored under the source folders into dest (keeping sub-folder layout),
+// updating the library in place so likes, play counts and playlists are preserved.
+func (a *App) MoveMusic(sources []string, dest string) {
+	go a.moveMusic(sources, dest)
 }
 
 func (a *App) PickFolder() string {
@@ -726,8 +916,9 @@ func (coverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/cover/") {
 		id := strings.TrimPrefix(r.URL.Path, "/cover/")
 		if id != "" {
-			p := coverPath(id)
-			if _, err := os.Stat(p); err == nil {
+			maxDim := normalizeThumbSize(r.URL.Query().Get("s"))
+			p := resizedCoverPath(id, maxDim)
+			if p != "" {
 				w.Header().Set("Cache-Control", "public, max-age=86400")
 				http.ServeFile(w, r, p)
 				return

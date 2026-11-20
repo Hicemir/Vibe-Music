@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte'
+  import GenreSettings from './GenreSettings.svelte'
   import { core, Go } from './store.svelte'
   import { EQ_BANDS, EQ_PRESETS } from './util'
   import type { Settings } from './types'
@@ -24,23 +25,59 @@
     eqTimer = setTimeout(() => save({ eq, eqEnabled: true }), 120)
   }
 
+  // The first folder is the primary one: new downloads are stored there.
+  async function applyDirs(dirs: string[], askMove: boolean) {
+    if (!s) return
+    const oldPrimary = s.musicDirs[0]
+    const newPrimary = dirs[0]
+    if (askMove && newPrimary !== oldPrimary && s.musicDirs.length > 0) {
+      const others = dirs.slice(1)
+      if (others.length > 0) {
+        core.modal = { type: 'movePrompt', newPrimary, others, nextDirs: dirs }
+        return
+      }
+    }
+    save({ musicDirs: dirs, downloadDir: newPrimary })
+  }
   async function addDir() {
     const d = await Go.PickFolder()
     if (d && s && !s.musicDirs.includes(d)) save({ musicDirs: [...s.musicDirs, d] })
   }
-  async function pickDownloadDir() {
-    const d = await Go.PickFolder()
-    if (d) save({ downloadDir: d })
+  function makePrimary(d: string) {
+    if (!s) return
+    applyDirs([d, ...s.musicDirs.filter((x) => x !== d)], true)
+  }
+  function moveDir(i: number, delta: number) {
+    if (!s) return
+    const j = i + delta
+    if (j < 0 || j >= s.musicDirs.length) return
+    const dirs = s.musicDirs.slice()
+    ;[dirs[i], dirs[j]] = [dirs[j], dirs[i]]
+    applyDirs(dirs, i === 0 || j === 0)
   }
   function removeDir(d: string) {
-    if (s && s.musicDirs.length > 1) save({ musicDirs: s.musicDirs.filter((x) => x !== d) })
+    if (s && s.musicDirs.length > 1) save({ musicDirs: s.musicDirs.filter((x) => x !== d), downloadDir: s.musicDirs.filter((x) => x !== d)[0] })
     else core.toast('You need at least one music folder')
+  }
+  async function moveInto(dest: string) {
+    if (!s) return
+    const sources = s.musicDirs.filter((x) => x !== dest)
+    if (sources.length === 0) return core.toast('Add another folder first')
+    const [n, size] = (await Go.CountMovable(sources, dest)) as number[]
+    if (n === 0) return core.toast('No songs to move')
+    core.modal = {
+      type: 'confirm',
+      title: `Move ${n} song(s) to this folder?`,
+      message: `${(size / 1048576).toFixed(0)} MB from your other folders will be moved into ${dest}. Likes, play counts and playlists are kept.`,
+      confirmLabel: 'Move music',
+      onConfirm: () => Go.MoveMusic(sources, dest),
+    }
   }
 
   const HOME_SECTION_META: { id: string; title: string; desc: string }[] = [
     { id: 'recentPlaylists', title: 'Recent playlists', desc: 'Compact top grid of your 4 most recently played playlists.' },
     { id: 'topTracks', title: 'Your top tracks', desc: 'Horizontal shelf of your most played tracks.' },
-    { id: 'quickPicks', title: 'Quick picks (Speed Dial)', desc: 'Horizontal strip of smart picks that start a local radio mix when clicked.' },
+    { id: 'quickPicks', title: 'Quick picks (Speed Dial)', desc: 'Horizontal strip of smart mixes you can play directly or open like playlists.' },
     { id: 'artistRadios', title: 'Artist radios', desc: 'Artist radio mixes combining your local songs with online discoveries.' },
     { id: 'discover', title: 'Online Discover (You might like)', desc: 'Opt-in YouTube Music recommendations for songs not in your library yet.' },
     { id: 'recentlyAdded', title: 'Recently added', desc: 'Horizontal shelf of the newest songs added to your library.' },
@@ -77,10 +114,17 @@
 {#if s}
   <div class="set-group">
     <h3>Library</h3>
-    <div class="hint">All folders below are scanned recursively into one big pool of songs. New files are picked up automatically.</div>
-    {#each s.musicDirs as d}
+    <div class="hint">All folders below are scanned recursively into one big pool of songs. The folder at the top is the <b>primary</b> folder: new downloads are stored there.</div>
+    {#each s.musicDirs as d, i (d)}
       <div class="dir-row">
         <Icon name="folder" size={18} /><span>{d}</span>
+        {#if i === 0}<span class="hint" style="color:var(--accent);font-weight:700;flex:0 0 auto">Primary</span>{/if}
+        {#if i > 0}<button class="btn ghost" onclick={() => makePrimary(d)} title="Make primary">Make primary</button>{/if}
+        {#if s.musicDirs.length > 1}
+          <button class="btn ghost" onclick={() => moveInto(d)} title="Move music from the other folders into this one">Move music here</button>
+          <button class="icon-btn" disabled={i === 0} onclick={() => moveDir(i, -1)} title="Move up">↑</button>
+          <button class="icon-btn" disabled={i === s.musicDirs.length - 1} onclick={() => moveDir(i, 1)} title="Move down">↓</button>
+        {/if}
         <button class="icon-btn" onclick={() => removeDir(d)} title="Remove"><Icon name="close" size={18} /></button>
       </div>
     {/each}
@@ -89,7 +133,12 @@
       <button class="btn ghost" onclick={() => Go.Rescan()}>Rescan now</button>
       {#if core.scan.scanning}<span class="hint">Scanning… {core.scan.done}/{core.scan.total}</span>{:else}<span class="hint">{core.tracks.length} songs</span>{/if}
     </div>
+    {#if core.moveStatus.running}
+      <div class="hint">Moving music… {core.moveStatus.done}/{core.moveStatus.total}</div>
+    {/if}
   </div>
+
+  <GenreSettings />
 
   <div class="set-group">
     <div style="display:flex;align-items:center;justify-content:space-between">
@@ -122,8 +171,7 @@
   <div class="set-group">
     <h3>Downloads (yt-dlp)</h3>
     <div class="set-row">
-      <div class="lbl">Download folder<div class="d">{s.downloadDir}</div></div>
-      <button class="btn" onclick={pickDownloadDir}>Change</button>
+      <div class="lbl">Download folder<div class="d">{s.musicDirs[0]} — your primary folder (change it in Library above)</div></div>
     </div>
     <div class="set-row">
       <div class="lbl">

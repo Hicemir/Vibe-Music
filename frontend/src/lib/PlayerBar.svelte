@@ -23,7 +23,7 @@
     if (delta === 0) return
     e.preventDefault()
     const step = delta > 0 ? 5 : -5
-    Go.Seek(clamp(p.position + step, 0, p.duration || 0))
+    Go.Seek(clamp(core.position + step, 0, core.duration || 0))
   }
 
   function onVolWheel(e: WheelEvent) {
@@ -51,7 +51,7 @@
     {#if t}
       {#if !core.coverExpanded}
         <div class="pb-thumb-wrap">
-          <Cover id={t.hasCover ? t.id : ''} class="thumb" />
+          <Cover id={t.hasCover ? t.id : ''} class="thumb" size={128} />
           <button
             class="cover-toggle-btn"
             onclick={() => (core.coverExpanded = true)}
@@ -98,9 +98,9 @@
       >
     </div>
     <div class="pb-seek" onwheel={onSeekWheel}>
-      <span class="tm l">{fmtTime(p.position)}</span>
-      <Slider value={p.position} max={p.duration || 1} disabled={!p.loaded} onchange={(v) => Go.Seek(v)} />
-      <span class="tm r">{fmtTime(p.duration)}</span>
+      <span class="tm l">{fmtTime(core.position)}</span>
+      <Slider value={core.position} max={core.duration || 1} disabled={!p.loaded} onchange={(v) => Go.Seek(v)} />
+      <span class="tm r">{fmtTime(core.duration)}</span>
     </div>
   </div>
 

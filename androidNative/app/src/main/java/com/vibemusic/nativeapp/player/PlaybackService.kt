@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.os.Build
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
@@ -18,6 +17,7 @@ import androidx.media3.session.MediaStyleNotificationHelper
 import com.vibemusic.nativeapp.MainActivity
 import com.vibemusic.nativeapp.R
 import com.vibemusic.nativeapp.VibeApplication
+import com.vibemusic.nativeapp.ui.CoverLoader
 
 class PlaybackService : MediaSessionService() {
 
@@ -175,12 +175,7 @@ class PlaybackService : MediaSessionService() {
         val nextIntent = Intent(this, PlaybackService::class.java).apply { action = ACTION_NEXT }
         val nextPI = PendingIntent.getService(this, 3, nextIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
-        val coverFile = app.store.getCoverFile(track.id)
-        val largeBmp: Bitmap? = if (coverFile.exists() && coverFile.length() > 0) {
-            try {
-                BitmapFactory.decodeFile(coverFile.absolutePath)
-            } catch (_: Exception) { null }
-        } else null
+        val largeBmp: Bitmap? = CoverLoader.getCachedOrDecodeSync(app.store, track.id, 600)
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_music_note)

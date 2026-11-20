@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -695,7 +696,7 @@ type Downloader struct {
 	nextID    int64
 	notify    chan struct{}
 	recMu     sync.Mutex
-	seenRec   map[string]bool
+	seenRec   []string
 	usedSeeds map[string]bool
 }
 
@@ -703,7 +704,6 @@ func NewDownloader(app *App) *Downloader {
 	d := &Downloader{
 		app:       app,
 		notify:    make(chan struct{}, 1),
-		seenRec:   map[string]bool{},
 		usedSeeds: map[string]bool{},
 	}
 	go d.worker()
@@ -717,14 +717,25 @@ func (d *Downloader) signal() {
 	}
 }
 
-func cookieArgs(set Settings) []string {
+func tempCookieArgs(set Settings) (args []string, cleanup func()) {
 	if hasValidYtCookiesFile() {
-		return []string{"--cookies", ytCookiesPath()}
+		if b, err := os.ReadFile(ytCookiesPath()); err == nil && len(b) > 0 {
+			if tmp, err := os.CreateTemp(dataDir(), "yt-cookies-*.txt"); err == nil {
+				_, werr := tmp.Write(b)
+				_ = tmp.Close()
+				if werr == nil {
+					p := tmp.Name()
+					return []string{"--cookies", p}, func() { _ = os.Remove(p) }
+				}
+				_ = os.Remove(tmp.Name())
+			}
+		}
+		return []string{"--cookies", ytCookiesPath()}, func() {}
 	}
 	if set.CookieBrowser != "" {
-		return []string{"--cookies-from-browser", set.CookieBrowser}
+		return []string{"--cookies-from-browser", set.CookieBrowser}, func() {}
 	}
-	return nil
+	return nil, func() {}
 }
 
 func (d *Downloader) List() []DownloadJob {
@@ -1136,7 +1147,9 @@ func (d *Downloader) run(ctx context.Context, j *DownloadJob) {
 	} else {
 		args = append(args, "--no-playlist")
 	}
-	args = append(args, cookieArgs(set)...)
+	cArgs, cookieCleanup := tempCookieArgs(set)
+	defer cookieCleanup()
+	args = append(args, cArgs...)
 	args = append(args, formatArgs(set.DownloadFormat)...)
 	if _, err := exec.LookPath("node"); err == nil {
 		d.app.ytdlp.mu.Lock()
@@ -1274,9 +1287,8 @@ func (d *Downloader) run(ctx context.Context, j *DownloadJob) {
 	}
 
 	// Index the files and refresh library, then group into a playlist when requested
-	d.app.scanner.Scan(d.app.scanDirs())
-	d.app.reloadTracks()
-	d.app.emit("library:changed")
+	// Only the downloaded files are indexed (no full library walk), so they show up instantly.
+	d.app.ingestFiles(files)
 	hasTargets, markLiked := d.applyJobPostActions(j, files)
 	if j.Mode == "playlist" && !hasTargets && !markLiked {
 		if plName == "" {
@@ -1334,14 +1346,61 @@ type DiscoverItem struct {
 	URL      string  `json:"url"`
 }
 
+type ytFlatThumb struct {
+	URL    string `json:"url"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+type ytFlatEntry struct {
+	ID         string        `json:"id"`
+	Title      string        `json:"title"`
+	Uploader   string        `json:"uploader"`
+	Channel    string        `json:"channel"`
+	Duration   float64       `json:"duration"`
+	Thumbnails []ytFlatThumb `json:"thumbnails"`
+}
+
 type ytFlatPlaylist struct {
-	Entries []struct {
-		ID       string  `json:"id"`
-		Title    string  `json:"title"`
-		Uploader string  `json:"uploader"`
-		Channel  string  `json:"channel"`
-		Duration float64 `json:"duration"`
-	} `json:"entries"`
+	Entries []ytFlatEntry `json:"entries"`
+}
+
+var googleThumbParamRe = regexp.MustCompile(`=(?:w\d+-h\d+|s\d+)[^/?#]*$`)
+
+func upgradeGoogleThumbURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if googleThumbParamRe.MatchString(raw) {
+		return googleThumbParamRe.ReplaceAllString(raw, "=w600-h600-l90-rj")
+	}
+	if idx := strings.LastIndex(raw, "="); idx > strings.LastIndex(raw, "/") {
+		return raw[:idx] + "=w600-h600-l90-rj"
+	}
+	return raw + "=w600-h600-l90-rj"
+}
+
+func bestDiscoverThumbURL(videoID string, thumbs []ytFlatThumb) string {
+	var bestLarge string
+	bestW := 0
+	for _, th := range thumbs {
+		u := strings.TrimSpace(th.URL)
+		if u == "" {
+			continue
+		}
+		if strings.Contains(u, "googleusercontent.com") || strings.Contains(u, "yt3.ggpht.com") {
+			return upgradeGoogleThumbURL(u)
+		}
+		if th.Width >= 640 && th.Width > bestW {
+			bestW = th.Width
+			bestLarge = u
+		}
+	}
+	if bestLarge != "" {
+		return bestLarge
+	}
+	return fmt.Sprintf("https://i.ytimg.com/vi/%s/maxresdefault.jpg", videoID)
 }
 
 var nonMusicTitleKeywords = []string{
@@ -1423,12 +1482,13 @@ func (d *Downloader) buildDiscoveryMatcher(extraKnown ...string) *songSet {
 		for _, k := range d.app.store.LoadRecommendedHistory() {
 			matcher.addRawHistoryKey(k)
 		}
+	} else {
+		d.recMu.Lock()
+		for _, k := range d.seenRec {
+			matcher.addRawHistoryKey(k)
+		}
+		d.recMu.Unlock()
 	}
-	d.recMu.Lock()
-	for k := range d.seenRec {
-		matcher.addRawHistoryKey(k)
-	}
-	d.recMu.Unlock()
 
 	return matcher
 }
@@ -1437,41 +1497,47 @@ func (d *Downloader) recordRecommended(items []DiscoverItem, knownNames map[stri
 	if len(items) == 0 {
 		return
 	}
-	var keys []string
-	d.recMu.Lock()
-	if d.seenRec == nil {
-		d.seenRec = map[string]bool{}
-	}
+	var batch []string
+	batchSeen := map[string]bool{}
 	for _, it := range items {
 		if it.VideoID != "" {
 			vk := "vid:" + it.VideoID
-			if !d.seenRec[vk] {
-				d.seenRec[vk] = true
-				keys = append(keys, vk)
+			if !batchSeen[vk] {
+				batchSeen[vk] = true
+				batch = append(batch, vk)
 			}
 		}
 		for _, tk := range songTitleKeys(it.Title, it.Artist, knownNames) {
 			sk := "song:" + tk
-			if !d.seenRec[sk] {
-				d.seenRec[sk] = true
-				keys = append(keys, sk)
+			if !batchSeen[sk] {
+				batchSeen[sk] = true
+				batch = append(batch, sk)
 			}
 		}
 	}
+	if len(batch) == 0 {
+		return
+	}
+	d.recMu.Lock()
+	existing := make(map[string]bool, len(d.seenRec)+len(batch))
+	for _, k := range d.seenRec {
+		existing[k] = true
+	}
+	for _, k := range batch {
+		if !existing[k] {
+			existing[k] = true
+			d.seenRec = append(d.seenRec, k)
+		}
+	}
+	d.seenRec = trimRecommendedHistory(d.seenRec, maxRecommendedHistorySongs)
 	d.recMu.Unlock()
-	if d.app.store != nil && len(keys) > 0 {
-		_ = d.app.store.AddRecommendedHistory(keys)
+	if d.app.store != nil {
+		_ = d.app.store.AddRecommendedHistory(batch)
 	}
 }
 
 func filterFlatPlaylistEntries(pl ytFlatPlaylist, matcher *songSet, shuffle bool, rngSeed int64) []DiscoverItem {
-	entries := append([]struct {
-		ID       string  `json:"id"`
-		Title    string  `json:"title"`
-		Uploader string  `json:"uploader"`
-		Channel  string  `json:"channel"`
-		Duration float64 `json:"duration"`
-	}(nil), pl.Entries...)
+	entries := append([]ytFlatEntry(nil), pl.Entries...)
 	if shuffle {
 		localRng := rand.New(rand.NewSource(rngSeed))
 		localRng.Shuffle(len(entries), func(a, b int) {
@@ -1503,7 +1569,7 @@ func filterFlatPlaylistEntries(pl ytFlatPlaylist, matcher *songSet, shuffle bool
 			Title:    title,
 			Artist:   artist,
 			Duration: e.Duration,
-			ThumbURL: fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", e.ID),
+			ThumbURL: bestDiscoverThumbURL(e.ID, e.Thumbnails),
 			URL:      fmt.Sprintf("https://www.youtube.com/watch?v=%s", e.ID),
 		})
 	}
@@ -1519,10 +1585,11 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 	matcher := d.buildDiscoveryMatcher()
 
 	type seedCandidate struct {
-		vid    string
-		artist string
+		vid   string
+		score float64
 	}
 	byArtist := map[string][]seedCandidate{}
+	artistAff := map[string]float64{}
 	totalVids := 0
 	d.app.trMu.RLock()
 	for _, t := range d.app.tracks {
@@ -1532,7 +1599,12 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 			if len(artists) > 0 {
 				primary = strings.ToLower(strings.TrimSpace(artists[0]))
 			}
-			byArtist[primary] = append(byArtist[primary], seedCandidate{vid: vid, artist: primary})
+			tScore := float64(t.PlayCount*10) + 1
+			if t.Liked {
+				tScore += 25
+			}
+			byArtist[primary] = append(byArtist[primary], seedCandidate{vid: vid, score: tScore})
+			artistAff[primary] += tScore
 			totalVids++
 		}
 	}
@@ -1544,13 +1616,20 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(seed)*99991))
 	artistKeys := make([]string, 0, len(byArtist))
+	artistRank := make(map[string]float64, len(byArtist))
 	for k := range byArtist {
 		list := byArtist[k]
-		rng.Shuffle(len(list), func(i, j int) { list[i], list[j] = list[j], list[i] })
+		// Prioritize listened/liked tracks within each artist with light random exploration
+		for i := range list {
+			list[i].score += rng.Float64() * 20
+		}
+		sort.SliceStable(list, func(i, j int) bool { return list[i].score > list[j].score })
+		byArtist[k] = list
+		artistRank[k] = math.Min(artistAff[k], 250) + rng.Float64()*45
 		artistKeys = append(artistKeys, k)
 	}
-	rng.Shuffle(len(artistKeys), func(i, j int) {
-		artistKeys[i], artistKeys[j] = artistKeys[j], artistKeys[i]
+	sort.SliceStable(artistKeys, func(i, j int) bool {
+		return artistRank[artistKeys[i]] > artistRank[artistKeys[j]]
 	})
 
 	const targetSeeds = 6
@@ -1655,7 +1734,9 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 			defer cancel()
 			mixURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", v, v)
 			args := []string{"--flat-playlist", "-J", "--playlist-end", "40", "--no-warnings"}
-			args = append(args, cookieArgs(set)...)
+			cArgs, cookieCleanup := tempCookieArgs(set)
+			defer cookieCleanup()
+			args = append(args, cArgs...)
 			args = append(args, mixURL)
 			cmd := exec.CommandContext(ctx, path, args...)
 			setCmdHidden(cmd)
@@ -1764,7 +1845,9 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 			ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
 			defer cancel()
 			args := []string{"--flat-playlist", "-J", "--playlist-end", "40", "--no-warnings"}
-			args = append(args, cookieArgs(set)...)
+			cArgs, cookieCleanup := tempCookieArgs(set)
+			defer cookieCleanup()
+			args = append(args, cArgs...)
 			args = append(args, target)
 			cmd := exec.CommandContext(ctx, path, args...)
 			setCmdHidden(cmd)

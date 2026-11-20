@@ -54,6 +54,11 @@ func binDir() string {
 	return d
 }
 
+// aiDir returns the directory for on-demand local AI runtime and models without creating it.
+func aiDir() string {
+	return filepath.Join(dataDir(), "ai")
+}
+
 // ---------- models ----------
 
 type Track struct {
@@ -74,6 +79,9 @@ type Track struct {
 	Format    string  `json:"format"`
 	Bitrate   int     `json:"bitrate"`
 	LastPlay  int64   `json:"lastPlayed"`
+	Genre       string   `json:"-"`      // pipe-joined taxonomy genres as stored in the DB
+	Genres      []string `json:"genres"` // same, split (first = most relevant)
+	GenreSource string   `json:"genreSource"` // "" unchecked | tag | ai | online | inferred | heuristic | user | none
 	Size      int64   `json:"-"`
 	MTime     int64   `json:"-"`
 }
@@ -86,6 +94,21 @@ type Playlist struct {
 	TrackCount  int     `json:"trackCount"`
 	Duration    float64 `json:"duration"`
 	CoverTracks []string `json:"coverTracks"`
+}
+
+type AISettings struct {
+	Enabled           bool   `json:"enabled"`
+	AutoOnNew         bool   `json:"autoOnNew"`
+	Provider          string `json:"provider"`        // "local" | "ollama" | "lmstudio" | "openai" | "gemini" | "anthropic" | "openrouter" | "groq" | "mistral" | "deepseek" | "custom"
+	BaseURL           string `json:"baseUrl"`
+	APIKey            string `json:"apiKey"`
+	Model             string `json:"model"`
+	LocalModelID      string `json:"localModelId"`    // "qwen2.5-1.5b" | "qwen2.5-3b" | "qwen2.5-7b" | "custom"
+	LocalCustomGGUF   string `json:"localCustomGguf"`
+	LocalGPU          bool   `json:"localGpu"`
+	AllowCustomGenres bool   `json:"allowCustomGenres"`
+	WebSearch         bool   `json:"webSearch"`
+	GeminiGrounding   bool   `json:"geminiGrounding"`
 }
 
 type Settings struct {
@@ -104,11 +127,12 @@ type Settings struct {
 	WindowWidth     int       `json:"windowWidth"`
 	WindowHeight    int       `json:"windowHeight"`
 	WindowMaximised bool      `json:"windowMaximised"`
-	HomeOrder         []string  `json:"homeOrder"`
-	HomeHidden        []string  `json:"homeHidden"`
-	QuickPicksRows    string    `json:"quickPicksRows"` // "1" | "2" | "3" | "auto"
-	CookieBrowser     string    `json:"cookieBrowser"`  // "" | "firefox" | "brave" | "chrome" | "chromium" | "edge" | "vivaldi"
-	BrowserBackground bool      `json:"browserBackground"`
+	HomeOrder         []string   `json:"homeOrder"`
+	HomeHidden        []string   `json:"homeHidden"`
+	QuickPicksRows    string     `json:"quickPicksRows"` // "1" | "2" | "3" | "auto"
+	CookieBrowser     string     `json:"cookieBrowser"`  // "" | "firefox" | "brave" | "chrome" | "chromium" | "edge" | "vivaldi"
+	BrowserBackground bool       `json:"browserBackground"`
+	AI                AISettings `json:"ai"`
 }
 
 var defaultHomeOrder = []string{"recentPlaylists", "topTracks", "quickPicks", "artistRadios", "discover", "recentlyAdded", "allMusic"}
@@ -132,6 +156,12 @@ func defaultSettings() Settings {
 		HomeHidden:      []string{"discover"},
 		QuickPicksRows:  "1",
 		CookieBrowser:   "",
+		AI: AISettings{
+			Provider:     "openai",
+			LocalModelID: "qwen2.5-3b",
+			LocalGPU:     true,
+			WebSearch:    true,
+		},
 	}
 }
 
@@ -147,7 +177,7 @@ type Store struct {
 
 func OpenStore() (*Store, error) {
 	p := filepath.Join(dataDir(), "library.db")
-	db, err := sql.Open("sqlite", "file:"+p+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", "file:"+p+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-16000)&_pragma=temp_store(MEMORY)")
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +186,7 @@ func OpenStore() (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
+	s.migrateGenresV2()
 	s.loadRoots()
 	return s, nil
 }
@@ -164,9 +195,46 @@ func (s *Store) migrate() error {
 	var legacy int
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='path'`).Scan(&legacy)
 	if legacy > 0 {
-		return s.migrateLegacy()
+		if err := s.migrateLegacy(); err != nil {
+			return err
+		}
+		return s.ensureIndexes()
 	}
-	return s.createSchema(s.db)
+	if err := s.createSchema(s.db); err != nil {
+		return err
+	}
+	if err := s.ensureGenreColumns(); err != nil {
+		return err
+	}
+	return s.ensureIndexes()
+}
+
+func (s *Store) ensureIndexes() error {
+	_, err := s.db.Exec(`
+CREATE INDEX IF NOT EXISTS idx_tracks_added ON tracks(added_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
+CREATE INDEX IF NOT EXISTS idx_play_history_track ON play_history(track_id);
+`)
+	return err
+}
+
+// ensureGenreColumns adds the genre columns to databases created before genres existed.
+func (s *Store) ensureGenreColumns() error {
+	for _, col := range []string{"genre", "genre_source"} {
+		var n int
+		_ = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name=?`, col).Scan(&n)
+		if n == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE tracks ADD COLUMN ` + col + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS track_context(
+  cache_key TEXT PRIMARY KEY,
+  hints TEXT NOT NULL DEFAULT '',
+  fetched_at INTEGER NOT NULL DEFAULT 0
+)`)
+	return err
 }
 
 type execer interface {
@@ -199,7 +267,20 @@ CREATE TABLE IF NOT EXISTS tracks(
   file_size INTEGER NOT NULL DEFAULT 0,
   mtime_unix INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL DEFAULT 0,
+  genre TEXT NOT NULL DEFAULT '',
+  genre_source TEXT NOT NULL DEFAULT '',
   UNIQUE(root_key, rel_path)
+);
+CREATE TABLE IF NOT EXISTS artist_genres(
+  artist_key TEXT PRIMARY KEY,
+  genre TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  checked_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS track_context(
+  cache_key TEXT PRIMARY KEY,
+  hints TEXT NOT NULL DEFAULT '',
+  fetched_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS playlists(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +301,9 @@ CREATE TABLE IF NOT EXISTS play_history(
   played_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_tracks_added ON tracks(added_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_play_history_played_at ON play_history(played_at);
+CREATE INDEX IF NOT EXISTS idx_play_history_track ON play_history(track_id);
 `)
 	return err
 }
@@ -614,10 +698,20 @@ func (s *Store) LoadSettings() Settings {
 	if set.QuickPicksRows == "" {
 		set.QuickPicksRows = "1"
 	}
+	if set.AI.Provider == "" {
+		set.AI.Provider = "openai"
+	}
+	if set.AI.LocalModelID == "" {
+		set.AI.LocalModelID = "qwen2.5-3b"
+	}
 	return set
 }
 
 func (s *Store) NormalizeArtists() {
+	var normDone string
+	if err := s.db.QueryRow(`SELECT value FROM settings WHERE key='artists_normalized_v1'`).Scan(&normDone); err == nil && normDone == "1" {
+		return
+	}
 	rows, err := s.db.Query(`SELECT id, artist FROM tracks`)
 	if err != nil {
 		return
@@ -638,11 +732,12 @@ func (s *Store) NormalizeArtists() {
 		}
 	}
 	rows.Close()
-	if len(updates) == 0 {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(updates) == 0 {
+		_, _ = s.db.Exec(`INSERT OR REPLACE INTO settings(key,value) VALUES('artists_normalized_v1','1')`)
+		return
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return
@@ -650,6 +745,7 @@ func (s *Store) NormalizeArtists() {
 	for _, u := range updates {
 		_, _ = tx.Exec(`UPDATE tracks SET artist=? WHERE id=?`, u.artist, u.id)
 	}
+	_, _ = tx.Exec(`INSERT OR REPLACE INTO settings(key,value) VALUES('artists_normalized_v1','1')`)
 	_ = tx.Commit()
 }
 
@@ -663,17 +759,21 @@ func (s *Store) SaveSettings(set Settings) error {
 
 // ----- tracks -----
 
-const trackCols = `id,yt_id,root_key,rel_path,title,artist,album,duration,year,added_at,liked,play_count,last_played,has_cover,format,bitrate,file_size,mtime_unix`
+const trackCols = `id,yt_id,root_key,rel_path,title,artist,album,duration,year,added_at,liked,play_count,last_played,has_cover,format,bitrate,file_size,mtime_unix,genre,genre_source`
 
 func (s *Store) scanTrack(r interface{ Scan(...any) error }) (Track, error) {
 	var t Track
 	var liked, cover int
 	var yt sql.NullString
 	err := r.Scan(&t.ID, &yt, &t.RootKey, &t.RelPath, &t.Title, &t.Artist, &t.Album, &t.Duration, &t.Year, &t.AddedAt, &liked,
-		&t.PlayCount, &t.LastPlay, &cover, &t.Format, &t.Bitrate, &t.Size, &t.MTime)
+		&t.PlayCount, &t.LastPlay, &cover, &t.Format, &t.Bitrate, &t.Size, &t.MTime, &t.Genre, &t.GenreSource)
 	t.YtID = yt.String
 	t.Liked = liked != 0
 	t.HasCover = cover != 0
+	t.Genres = splitGenres(t.Genre)
+	if t.Genres == nil {
+		t.Genres = []string{}
+	}
 	t.Path = s.ResolvePath(t.RootKey, t.RelPath)
 	return t, err
 }
@@ -763,24 +863,33 @@ func (s *Store) UpsertTrack(t Track) (string, error) {
 	// a different id previously lived at this path (file content / tags changed): carry its state over
 	var prevID string
 	var pAdded, pLiked, pPlays, pLast int64
-	err = tx.QueryRow(`SELECT id,added_at,liked,play_count,last_played FROM tracks WHERE root_key=? AND rel_path=? AND id<>?`,
-		t.RootKey, t.RelPath, t.ID).Scan(&prevID, &pAdded, &pLiked, &pPlays, &pLast)
+	var pGenre, pGenreSrc string
+	err = tx.QueryRow(`SELECT id,added_at,liked,play_count,last_played,genre,genre_source FROM tracks WHERE root_key=? AND rel_path=? AND id<>?`,
+		t.RootKey, t.RelPath, t.ID).Scan(&prevID, &pAdded, &pLiked, &pPlays, &pLast, &pGenre, &pGenreSrc)
 	liked, plays, last := int64(0), int64(0), int64(0)
 	if err == nil {
 		if _, err := tx.Exec(`UPDATE tracks SET rel_path=? WHERE id=?`, "//moved:"+prevID, prevID); err != nil {
 			return "", err
 		}
 		t.AddedAt, liked, plays, last = pAdded, pLiked, pPlays, pLast
+		if t.Genre == "" && pGenre != "" {
+			t.Genre, t.GenreSource = pGenre, pGenreSrc
+		}
+	}
+	if t.Genre != "" && t.GenreSource == "" {
+		t.GenreSource = "tag"
 	}
 
-	if _, err := tx.Exec(`INSERT INTO tracks(id,yt_id,root_key,rel_path,title,artist,album,duration,year,added_at,liked,play_count,last_played,has_cover,format,bitrate,file_size,mtime_unix,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	if _, err := tx.Exec(`INSERT INTO tracks(id,yt_id,root_key,rel_path,title,artist,album,duration,year,added_at,liked,play_count,last_played,has_cover,format,bitrate,file_size,mtime_unix,updated_at,genre,genre_source)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET yt_id=excluded.yt_id, root_key=excluded.root_key, rel_path=excluded.rel_path,
   title=excluded.title, artist=excluded.artist, album=excluded.album, duration=excluded.duration, year=excluded.year,
   has_cover=excluded.has_cover, format=excluded.format, bitrate=excluded.bitrate, file_size=excluded.file_size,
-  mtime_unix=excluded.mtime_unix, updated_at=excluded.updated_at`,
+  mtime_unix=excluded.mtime_unix, updated_at=excluded.updated_at,
+  genre=CASE WHEN tracks.genre_source='user' THEN tracks.genre WHEN excluded.genre<>'' THEN excluded.genre ELSE tracks.genre END,
+  genre_source=CASE WHEN tracks.genre_source='user' THEN 'user' WHEN excluded.genre<>'' THEN excluded.genre_source ELSE tracks.genre_source END`,
 		t.ID, yt, t.RootKey, t.RelPath, t.Title, t.Artist, t.Album, t.Duration, t.Year, t.AddedAt, liked, plays, last,
-		cover, t.Format, t.Bitrate, t.Size, t.MTime, now); err != nil {
+		cover, t.Format, t.Bitrate, t.Size, t.MTime, now, t.Genre, t.GenreSource); err != nil {
 		return "", err
 	}
 	if prevID != "" {
@@ -878,6 +987,93 @@ func (s *Store) SaveSyncedYtCollections(ids []string) error {
 	return err
 }
 
+func (s *Store) LoadPendingAITracks() []string {
+	var raw string
+	if err := s.db.QueryRow(`SELECT value FROM settings WHERE key='ai_genre_pending'`).Scan(&raw); err != nil || strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	var ids []string
+	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+		return []string{}
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func (s *Store) SavePendingAITracks(ids []string) error {
+	seen := map[string]bool{}
+	clean := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" && !seen[id] {
+			seen[id] = true
+			clean = append(clean, id)
+		}
+	}
+	b, _ := json.Marshal(clean)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`INSERT INTO settings(key,value) VALUES('ai_genre_pending',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, string(b))
+	return err
+}
+
+func (s *Store) ClearPendingAITracks() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key='ai_genre_pending'`)
+	return err
+}
+
+func (s *Store) GetTrackContext(key string) (hints string, fetchedAt int64, ok bool) {
+	err := s.db.QueryRow(`SELECT hints, fetched_at FROM track_context WHERE cache_key=?`, key).Scan(&hints, &fetchedAt)
+	return hints, fetchedAt, err == nil
+}
+
+func (s *Store) SetTrackContext(key, hints string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _ = s.db.Exec(`INSERT INTO track_context(cache_key,hints,fetched_at) VALUES(?,?,?)
+ON CONFLICT(cache_key) DO UPDATE SET hints=excluded.hints, fetched_at=excluded.fetched_at`,
+		key, hints, time.Now().Unix())
+}
+
+const maxRecommendedHistorySongs = 80
+
+func trimRecommendedHistory(keys []string, maxSongs int) []string {
+	if maxSongs <= 0 || len(keys) == 0 {
+		return []string{}
+	}
+	vids := 0
+	cut := 0
+	for i := len(keys) - 1; i >= 0; i-- {
+		if strings.HasPrefix(keys[i], "vid:") {
+			vids++
+			if vids == maxSongs {
+				cut = i
+				break
+			}
+		}
+	}
+	if vids < maxSongs {
+		if maxKeys := maxSongs * 4; len(keys) > maxKeys {
+			return keys[len(keys)-maxKeys:]
+		}
+		return keys
+	}
+	if maxKeys := maxSongs * 6; len(keys)-cut > maxKeys {
+		cut = len(keys) - maxKeys
+	}
+	return keys[cut:]
+}
+
 func (s *Store) loadRecommendedHistoryLocked() []string {
 	var raw string
 	if err := s.db.QueryRow(`SELECT value FROM settings WHERE key='recommended_discover_history'`).Scan(&raw); err != nil || strings.TrimSpace(raw) == "" {
@@ -896,7 +1092,7 @@ func (s *Store) loadRecommendedHistoryLocked() []string {
 			out = append(out, k)
 		}
 	}
-	return out
+	return trimRecommendedHistory(out, maxRecommendedHistorySongs)
 }
 
 func (s *Store) LoadRecommendedHistory() []string {
@@ -932,10 +1128,7 @@ func (s *Store) AddRecommendedHistory(keys []string) error {
 	if !added {
 		return nil
 	}
-	const maxHistory = 5000
-	if len(merged) > maxHistory {
-		merged = merged[len(merged)-maxHistory:]
-	}
+	merged = trimRecommendedHistory(merged, maxRecommendedHistorySongs)
 	b, _ := json.Marshal(merged)
 	_, err := s.db.Exec(`INSERT INTO settings(key,value) VALUES('recommended_discover_history',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, string(b))
 	return err
@@ -1011,28 +1204,40 @@ func (s *Store) Playlists() ([]Playlist, error) {
 		return nil, err
 	}
 	out := []Playlist{}
+	byID := make(map[int64]int)
 	for rows.Next() {
 		var p Playlist
 		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedAt, &p.LastPlayed, &p.TrackCount, &p.Duration); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		p.CoverTracks = []string{}
+		byID[p.ID] = len(out)
 		out = append(out, p)
 	}
 	rows.Close()
-	for i := range out {
-		r2, err := s.db.Query(`SELECT t.id FROM playlist_tracks pt JOIN tracks t ON t.id=pt.track_id
- WHERE pt.playlist_id=? AND t.has_cover=1 ORDER BY pt.position LIMIT 4`, out[i].ID)
-		if err != nil {
-			continue
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	cRows, err := s.db.Query(`SELECT pt.playlist_id, pt.track_id
+ FROM playlist_tracks pt
+ JOIN tracks t ON t.id = pt.track_id
+ WHERE t.has_cover = 1
+ ORDER BY pt.playlist_id, pt.position`)
+	if err == nil {
+		defer cRows.Close()
+		for cRows.Next() {
+			var pid int64
+			var tid string
+			if cRows.Scan(&pid, &tid) == nil {
+				if idx, ok := byID[pid]; ok && len(out[idx].CoverTracks) < 4 {
+					out[idx].CoverTracks = append(out[idx].CoverTracks, tid)
+				}
+			}
 		}
-		out[i].CoverTracks = []string{}
-		for r2.Next() {
-			var id string
-			_ = r2.Scan(&id)
-			out[i].CoverTracks = append(out[i].CoverTracks, id)
-		}
-		r2.Close()
 	}
 	return out, nil
 }

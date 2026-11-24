@@ -47,6 +47,7 @@ data class Track(
 
 data class Playlist(
     val id: Long,
+    val syncUuid: String = "",
     val name: String,
     val createdAt: Long = 0L,
     val lastPlayed: Long = 0L,

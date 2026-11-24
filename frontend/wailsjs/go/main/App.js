@@ -30,6 +30,10 @@ export function CancelLocalAIDownload() {
   return window['go']['main']['App']['CancelLocalAIDownload']();
 }
 
+export function CancelSync() {
+  return window['go']['main']['App']['CancelSync']();
+}
+
 export function ClearDownloads() {
   return window['go']['main']['App']['ClearDownloads']();
 }
@@ -44,6 +48,10 @@ export function ClearQueue() {
 
 export function CloseWindow() {
   return window['go']['main']['App']['CloseWindow']();
+}
+
+export function ConnectSyncManualIP(arg1) {
+  return window['go']['main']['App']['ConnectSyncManualIP'](arg1);
 }
 
 export function CountMovable(arg1, arg2) {
@@ -154,8 +162,16 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetSyncState() {
+  return window['go']['main']['App']['GetSyncState']();
+}
+
 export function GetTracks() {
   return window['go']['main']['App']['GetTracks']();
+}
+
+export function GetTrustedSyncPeers() {
+  return window['go']['main']['App']['GetTrustedSyncPeers']();
 }
 
 export function GetVersion() {
@@ -270,8 +286,16 @@ export function RedetectGenres() {
   return window['go']['main']['App']['RedetectGenres']();
 }
 
+export function RemoveFromPlaylist(arg1, arg2) {
+  return window['go']['main']['App']['RemoveFromPlaylist'](arg1, arg2);
+}
+
 export function RemoveFromQueue(arg1) {
   return window['go']['main']['App']['RemoveFromQueue'](arg1);
+}
+
+export function RemoveTrustedSyncPeer(arg1) {
+  return window['go']['main']['App']['RemoveTrustedSyncPeer'](arg1);
 }
 
 export function RenamePlaylist(arg1, arg2) {
@@ -280,6 +304,10 @@ export function RenamePlaylist(arg1, arg2) {
 
 export function Rescan() {
   return window['go']['main']['App']['Rescan']();
+}
+
+export function RespondSyncPair(arg1, arg2, arg3) {
+  return window['go']['main']['App']['RespondSyncPair'](arg1, arg2, arg3);
 }
 
 export function Resume() {
@@ -318,6 +346,10 @@ export function SetSleepTimer(arg1) {
   return window['go']['main']['App']['SetSleepTimer'](arg1);
 }
 
+export function SetSyncDeviceName(arg1) {
+  return window['go']['main']['App']['SetSyncDeviceName'](arg1);
+}
+
 export function SetTracksGenre(arg1, arg2) {
   return window['go']['main']['App']['SetTracksGenre'](arg1, arg2);
 }
@@ -346,8 +378,20 @@ export function StartDownloadToPlaylist(arg1, arg2) {
   return window['go']['main']['App']['StartDownloadToPlaylist'](arg1, arg2);
 }
 
+export function StartPeerSync(arg1, arg2) {
+  return window['go']['main']['App']['StartPeerSync'](arg1, arg2);
+}
+
+export function StartSyncDiscovery() {
+  return window['go']['main']['App']['StartSyncDiscovery']();
+}
+
 export function StartYtMusicLogin() {
   return window['go']['main']['App']['StartYtMusicLogin']();
+}
+
+export function StopSyncDiscovery() {
+  return window['go']['main']['App']['StopSyncDiscovery']();
 }
 
 export function SyncYtMusicLibrary() {

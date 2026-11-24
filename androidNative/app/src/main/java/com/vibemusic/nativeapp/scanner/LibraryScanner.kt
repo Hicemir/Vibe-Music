@@ -24,12 +24,14 @@ class LibraryScanner(
     private val onProgress: ((done: Int, total: Int, isScanning: Boolean) -> Unit)? = null
 ) {
     private val scanMutex = Mutex()
+    @Volatile var isPaused: Boolean = false
     private val audioExts = setOf(
         "mp3", "m4a", "opus", "ogg", "oga", "flac", "wav", "aac", "wma", "webm", "mka", "mp4", "alac"
     )
 
     suspend fun scan(dirs: List<String>) = withContext(Dispatchers.IO) {
         scanMutex.withLock {
+            if (isPaused) return@withLock
             onProgress?.invoke(0, 0, true)
 
             val allExisting = store.getAllTracks(includeHidden = true)

@@ -44,6 +44,8 @@ func (p *Player) engSetVolume(vol float64) {
 	p.emit("webplayer:cmd", map[string]any{"cmd": "volume", "vol": vol / 100.0})
 }
 
+func (p *Player) engPosition() (float64, bool) { return 0, false }
+
 func (p *Player) engSetFilters(set Settings) {
 	p.emit("webplayer:cmd", map[string]any{
 		"cmd":     "eq",

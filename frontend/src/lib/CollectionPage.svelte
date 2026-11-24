@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import CollectionView from './CollectionView.svelte'
   import { core, Go } from './store.svelte'
   import { hasArtist, norm } from './util'
@@ -9,42 +10,67 @@
   let radioOnlineItems = $state<DiscoverItem[]>([])
   let radioOnlineLoading = $state(false)
   let radioOnlineSeed = $state(0)
+  let plReqId = 0
+
+  function sameIds(a: string[] | undefined, b: string[]): boolean {
+    if (!a || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false
+    }
+    return true
+  }
 
   $effect(() => {
     if (r.name === 'playlist') {
       void core.playlists
       const id = Number(r.id)
-      const cached = core.playlistTrackMap[id]
-      if (cached && plIds.length === 0) {
-        plIds = cached
-      }
-      Go.GetPlaylistTrackIDs(id).then((x) => {
-        const next = (x as string[]) ?? []
-        plIds = next
-        core.playlistTrackMap = { ...core.playlistTrackMap, [id]: next }
+      const reqId = ++plReqId
+      untrack(() => {
+        const cached = core.playlistTrackMap[id]
+        if (cached && !sameIds(plIds, cached)) {
+          plIds = cached
+        }
       })
+      Go.GetPlaylistTrackIDs(id).then((x) => {
+        if (reqId !== plReqId) return
+        const next = (x as string[]) ?? []
+        if (!sameIds(plIds, next)) {
+          plIds = next
+        }
+        if (!sameIds(core.playlistTrackMap[id], next)) {
+          core.playlistTrackMap = { ...core.playlistTrackMap, [id]: next }
+        }
+      })
+    } else {
+      plReqId++
     }
   })
 
+  let radioReqId = 0
+
   function loadArtistRadioOnline(artist: string, seed: number) {
+    const reqId = ++radioReqId
     radioOnlineLoading = true
     ;(Go as any)
       .GetArtistOnlineDiscovery?.(artist, seed)
       .then((items: DiscoverItem[]) => {
+        if (reqId !== radioReqId) return
         radioOnlineItems = items ?? []
       })
       .catch(() => {})
       .finally(() => {
-        radioOnlineLoading = false
+        if (reqId === radioReqId) radioOnlineLoading = false
       })
   }
 
   $effect(() => {
     if (r.name === 'artistradio') {
       const artist = String(r.id)
+      const seed = radioOnlineSeed
       radioOnlineItems = []
-      loadArtistRadioOnline(artist, radioOnlineSeed)
+      loadArtistRadioOnline(artist, seed)
     } else {
+      radioReqId++
       radioOnlineItems = []
       radioOnlineLoading = false
     }
@@ -159,7 +185,7 @@
     isPlayingOverride={isQuickPickPlaying}
     onlineTracks={r.name === 'artistradio' ? radioOnlineItems : []}
     onlineLoading={r.name === 'artistradio' ? radioOnlineLoading : false}
-    onrefreshonline={r.name === 'artistradio' ? () => loadArtistRadioOnline(String(r.id), ++radioOnlineSeed) : undefined}
+    onrefreshonline={r.name === 'artistradio' ? () => { radioOnlineSeed++ } : undefined}
     onrefreshmix={r.name === 'quickpick' && quickPickSeedTrack ? () => core.refreshQuickPickMix(quickPickSeedTrack.id) : undefined}
     refreshMixHint={r.name === 'quickpick' && quickPickSeedTrack
       ? `Want a different vibe around “${quickPickSeedTrack.title}”? Refresh to pull a new mix from your library.`

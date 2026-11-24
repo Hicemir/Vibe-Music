@@ -6,7 +6,7 @@
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu } from './menus'
-  import { animateShelfScroll, attachShelfNav, buildQuickPicks, fallbackYtThumb, fmtTime, getShelfTargetLeft, norm, scrollShelfContainer, splitArtists } from './util'
+  import { animateShelfScroll, attachShelfNav, buildQuickPicks, discoverThumbUrl, fallbackYtThumb, fmtTime, getShelfTargetLeft, norm, scrollShelfContainer, splitArtists } from './util'
   import type { DiscoverItem, MenuItem, Settings, Track } from './types'
 
   const hour = new Date().getHours()
@@ -30,8 +30,8 @@
   let showAllHomeTracks = $state(false)
   let dragSec = $state<string | null>(null)
   let dragOverSec = $state<string | null>(null)
-  const SHELF_INITIAL = 12
-  const SHELF_STEP = 12
+  const SHELF_INITIAL = 8
+  const SHELF_STEP = 8
 
   let qpSeed = $state(0)
   let qpCols = $state(36)
@@ -195,10 +195,10 @@
 
   function updateShelfState(secId: string) {
     const el = shelfEls[secId]
-    if (!el) return
+    if (!el || el.clientWidth <= 0) return
     const total = shelfTotal(secId)
     const shown = shelfShown[secId] ?? SHELF_INITIAL
-    if (shown < total && el.scrollLeft + el.clientWidth >= el.scrollWidth - 600) {
+    if (el.scrollLeft > 0 && shown < total && el.scrollLeft + el.clientWidth >= el.scrollWidth - 600) {
       shelfShown = { ...shelfShown, [secId]: Math.min(total, shown + SHELF_STEP) }
     }
     const left = el.scrollLeft > 2
@@ -382,12 +382,11 @@
   {/if}
 {/snippet}
 
-{#each visibleSections as sec, secIdx (sec)}
+{#each visibleSections as sec (sec)}
   {#if sec === 'recentPlaylists'}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="home-block"
-      class:below-fold={!editingLayout && secIdx >= 2}
       class:editing={editingLayout}
       class:sec-dragover={dragOverSec === 'recentPlaylists'}
       draggable={editingLayout}
@@ -433,7 +432,6 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
-        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'topTracks'}
         draggable={editingLayout}
@@ -478,7 +476,6 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
-        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'quickPicks'}
         draggable={editingLayout}
@@ -543,7 +540,6 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
-        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'artistRadios'}
         draggable={editingLayout}
@@ -591,7 +587,6 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="section home-block"
-      class:below-fold={!editingLayout && secIdx >= 2}
       class:editing={editingLayout}
       class:sec-dragover={dragOverSec === 'discover'}
       draggable={editingLayout}
@@ -628,8 +623,8 @@
           {@render reorderControls('discover')}
         </div>
       </div>
-      {#if core.discoverItems.length === 0 && (core.discoverLoading || (!core.discoverAttempted && core.tracks.length > 0))}
-        <div class="shelf" aria-busy="true" aria-label="Loading online recommendations">
+      {#if core.discoverItems.length === 0 && core.discoverLoading}
+        <div class="shelf discover-skel-shelf" aria-busy="true" aria-label="Loading online recommendations">
           {#each [0, 1, 2, 3, 4, 5, 6, 7] as sk (sk)}
             <div class="card discover-card skeleton-card" aria-hidden="true">
               <div class="art discover-art skel-box"></div>
@@ -652,7 +647,7 @@
             <div class="card discover-card">
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
               <div class="art discover-art" onclick={() => openExternal(d.url)} title="Try out in browser (YouTube)">
-                <img src={d.thumbUrl} alt="" loading="lazy" decoding="async" width="480" height="480" onload={fallbackYtThumb} onerror={fallbackYtThumb} style="width:100%;height:100%;object-fit:cover;display:block" />
+                <img src={discoverThumbUrl(d.videoId, d.thumbUrl)} alt="" loading="lazy" decoding="async" width="480" height="480" onerror={fallbackYtThumb} style="width:100%;height:100%;object-fit:cover;display:block" />
                 <div class="discover-try-overlay">
                   <div class="discover-try-pill">
                     <Icon name="external" size={16} />
@@ -681,7 +676,6 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="section home-block"
-        class:below-fold={!editingLayout && secIdx >= 2}
         class:editing={editingLayout}
         class:sec-dragover={dragOverSec === 'recentlyAdded'}
         draggable={editingLayout}
@@ -718,7 +712,7 @@
     {/if}
 
   {:else if sec === 'allMusic'}
-    <div class="section home-block" class:below-fold={!editingLayout && secIdx >= 2} class:editing={editingLayout}>
+    <div class="section home-block" class:editing={editingLayout}>
       <div class="section-head">
         <h2>All your music <span style="color:var(--text-dim);font-weight:600;font-size:15px">· {core.tracks.length} songs</span></h2>
         <div style="display:flex;gap:10px;align-items:center">

@@ -57,22 +57,30 @@ type Player struct {
 	muted   bool
 	fade    float64
 
-	playing    bool
-	loaded     bool
-	pos, dur   float64
-	counted    bool
-	playlist   int64
-	previewTID string
-	errStreak  int
+	playing     bool
+	loaded      bool
+	pos, dur    float64
+	pendingSeek float64
+	counted     bool
+	playlist    int64
+	previewTID  string
+	errStreak   int
 
 	sleepAt  time.Time
 	sleepEnd bool
 
-	quit chan struct{}
+	quit     chan struct{}
+	saveCh   chan SavedQueueState
+	loadHook func(id, path string) error
+	seekHook func(sec float64)
 }
 
 func NewPlayer(store *Store, lookup func(string) (Track, bool), emit func(string, ...any)) *Player {
-	return &Player{store: store, lookup: lookup, emit: emit, idx: -1, repeat: "off", volume: 80, prevVol: 80, quit: make(chan struct{})}
+	return &Player{
+		store: store, lookup: lookup, emit: emit,
+		idx: -1, repeat: "off", volume: 80, prevVol: 80,
+		quit: make(chan struct{}), saveCh: make(chan SavedQueueState, 1),
+	}
 }
 
 func (p *Player) Init(set Settings) error {
@@ -84,23 +92,183 @@ func (p *Player) Init(set Settings) error {
 		p.prevVol = p.volume
 	}
 	p.fade = set.FadeSeconds
+	p.restoreStateLocked()
 	p.mu.Unlock()
 
 	if err := p.initEngine(set); err != nil {
 		return err
 	}
 
+	go p.saveLoop()
 	go p.tickLoop()
 	return nil
 }
 
 func (p *Player) Close() {
+	p.SaveState()
 	select {
 	case <-p.quit:
 	default:
 		close(p.quit)
 	}
 	p.closeEngine()
+}
+
+func (p *Player) snapshotQueueStateLocked() SavedQueueState {
+	items := make([]QueueEntry, len(p.items))
+	for i, it := range p.items {
+		items[i] = QueueEntry{QID: it.QID, TID: it.TID}
+	}
+	orig := append([]int64(nil), p.orig...)
+	pos := p.pos
+	if p.previewTID != "" || pos < 0 {
+		pos = 0
+	}
+	return SavedQueueState{
+		Items:      items,
+		Orig:       orig,
+		NextQID:    p.nextQID,
+		Index:      p.idx,
+		Position:   pos,
+		PlaylistID: p.playlist,
+		Shuffle:    p.shuffle,
+	}
+}
+
+func (p *Player) saveStateLocked() {
+	if p.store == nil || p.saveCh == nil {
+		return
+	}
+	st := p.snapshotQueueStateLocked()
+	select {
+	case <-p.saveCh:
+	default:
+	}
+	select {
+	case p.saveCh <- st:
+	default:
+	}
+}
+
+func (p *Player) saveLoop() {
+	for {
+		select {
+		case <-p.quit:
+			return
+		case st := <-p.saveCh:
+			if p.store != nil {
+				_ = p.store.SaveQueueState(st)
+			}
+		}
+	}
+}
+
+func (p *Player) syncPosFromEngine() {
+	p.mu.Lock()
+	shouldPoll := p.loaded && p.playing
+	p.mu.Unlock()
+	if !shouldPoll {
+		return
+	}
+	pos, ok := p.engPosition()
+	if !ok {
+		return
+	}
+	p.mu.Lock()
+	if p.loaded && (p.pendingSeek <= 0 || pos > 0) {
+		p.pos = pos
+	}
+	p.mu.Unlock()
+}
+
+func (p *Player) SaveState() {
+	if p.store == nil {
+		return
+	}
+	p.syncPosFromEngine()
+	p.mu.Lock()
+	st := p.snapshotQueueStateLocked()
+	p.mu.Unlock()
+	_ = p.store.SaveQueueState(st)
+}
+
+func (p *Player) restoreStateLocked() {
+	if p.store == nil {
+		return
+	}
+	saved, ok := p.store.LoadQueueState()
+	if !ok || len(saved.Items) == 0 {
+		return
+	}
+	validItems := make([]qItem, 0, len(saved.Items))
+	validQIDs := make(map[int64]bool, len(saved.Items))
+	maxQID := saved.NextQID
+	newIdx := -1
+	sameTrack := false
+	for i, it := range saved.Items {
+		if _, exists := p.lookup(it.TID); !exists {
+			continue
+		}
+		qid := it.QID
+		if qid <= 0 || validQIDs[qid] {
+			maxQID++
+			qid = maxQID
+		} else if qid > maxQID {
+			maxQID = qid
+		}
+		validQIDs[qid] = true
+		if i <= saved.Index {
+			newIdx = len(validItems)
+			if i == saved.Index {
+				sameTrack = true
+			}
+		}
+		validItems = append(validItems, qItem{QID: qid, TID: it.TID})
+	}
+	if len(validItems) == 0 {
+		return
+	}
+	if newIdx < 0 {
+		newIdx = 0
+	}
+	orig := make([]int64, 0, len(validItems))
+	seenOrig := make(map[int64]bool, len(validItems))
+	for _, q := range saved.Orig {
+		if validQIDs[q] && !seenOrig[q] {
+			seenOrig[q] = true
+			orig = append(orig, q)
+		}
+	}
+	for _, it := range validItems {
+		if !seenOrig[it.QID] {
+			seenOrig[it.QID] = true
+			orig = append(orig, it.QID)
+		}
+	}
+
+	p.items = validItems
+	p.orig = orig
+	p.nextQID = maxQID
+	p.idx = newIdx
+	p.playlist = saved.PlaylistID
+	p.shuffle = saved.Shuffle
+	p.playing = false
+	p.loaded = false
+	p.counted = false
+	p.previewTID = ""
+	p.pendingSeek = 0
+
+	if tr, exists := p.lookup(p.items[p.idx].TID); exists {
+		p.dur = tr.Duration
+	}
+	pos := 0.0
+	if sameTrack && saved.Position > 0 {
+		pos = saved.Position
+		if p.dur > 0 && pos >= p.dur-1 {
+			pos = 0
+		}
+	}
+	p.pos = pos
 }
 
 // ---------- audio callbacks (used by WebAudio engine on Windows) ----------
@@ -112,6 +280,18 @@ func (p *Player) OnAudioLoaded(dur float64) {
 	if dur > 0 {
 		p.dur = dur
 	}
+	seekTo := p.pendingSeek
+	p.pendingSeek = 0
+	if seekTo > 0 {
+		if p.dur > 0 && seekTo >= p.dur {
+			seekTo = p.dur - 0.5
+			if seekTo < 0 {
+				seekTo = 0
+			}
+		}
+		p.pos = seekTo
+		p.seekAudioLocked(seekTo)
+	}
 	st, tr, ok := p.snapshotLocked()
 	p.mu.Unlock()
 	p.publish(st, tr, ok)
@@ -119,7 +299,9 @@ func (p *Player) OnAudioLoaded(dur float64) {
 
 func (p *Player) OnAudioTime(pos, dur float64) {
 	p.mu.Lock()
-	p.pos = pos
+	if p.pendingSeek <= 0 || pos > 0 {
+		p.pos = pos
+	}
 	if dur > 0 {
 		p.dur = dur
 	}
@@ -141,6 +323,7 @@ func (p *Player) OnAudioPause(paused bool) {
 func (p *Player) OnAudioEOF() {
 	p.mu.Lock()
 	p.onEOFLocked()
+	p.saveStateLocked()
 	st, tr, ok := p.snapshotLocked()
 	qs := p.queueLocked()
 	p.mu.Unlock()
@@ -151,6 +334,7 @@ func (p *Player) OnAudioEOF() {
 func (p *Player) OnAudioError(msg string) {
 	p.mu.Lock()
 	p.onErrorLocked(fmt.Errorf("%s", msg))
+	p.saveStateLocked()
 	st, tr, ok := p.snapshotLocked()
 	qs := p.queueLocked()
 	p.mu.Unlock()
@@ -187,8 +371,9 @@ func (p *Player) onErrorLocked(err error) {
 // ---------- tick loop (fade, play counts, sleep timer, state push) ----------
 
 func (p *Player) tickLoop() {
-	t := time.NewTicker(250 * time.Millisecond)
+	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
+	tickCount := 0
 	for {
 		select {
 		case <-p.quit:
@@ -196,8 +381,26 @@ func (p *Player) tickLoop() {
 		case <-t.C:
 		}
 		p.mu.Lock()
+		poll := p.loaded && p.playing
+		p.mu.Unlock()
+
+		var polledPos float64
+		var hasPolledPos bool
+		if poll {
+			polledPos, hasPolledPos = p.engPosition()
+		}
+
+		p.mu.Lock()
+		if hasPolledPos && p.loaded && p.playing && (p.pendingSeek <= 0 || polledPos > 0) {
+			p.pos = polledPos
+		}
 		changedVol := false
 		if p.loaded && p.playing {
+			tickCount++
+			if tickCount >= 10 {
+				tickCount = 0
+				p.saveStateLocked()
+			}
 			if p.fade > 0 {
 				changedVol = true
 			}
@@ -334,6 +537,7 @@ func (p *Player) Queue() map[string]any {
 }
 
 func (p *Player) flush() {
+	p.saveStateLocked()
 	st, tr, ok := p.snapshotLocked()
 	qs := p.queueLocked()
 	p.mu.Unlock()
@@ -343,7 +547,26 @@ func (p *Player) flush() {
 
 // ---------- core playback ----------
 
+func (p *Player) loadAudioLocked(id, path string) error {
+	if p.loadHook != nil {
+		return p.loadHook(id, path)
+	}
+	return p.engLoadFile(id, path)
+}
+
+func (p *Player) seekAudioLocked(sec float64) {
+	if p.seekHook != nil {
+		p.seekHook(sec)
+		return
+	}
+	p.engSeek(sec)
+}
+
 func (p *Player) playIndexLocked(i int) {
+	p.playIndexAtLocked(i, 0)
+}
+
+func (p *Player) playIndexAtLocked(i int, startPos float64) {
 	if i < 0 || i >= len(p.items) {
 		return
 	}
@@ -352,19 +575,23 @@ func (p *Player) playIndexLocked(i int) {
 		// track vanished from library; drop it and try the next
 		p.removeAtLocked(i)
 		if i < len(p.items) {
-			p.playIndexLocked(i)
+			p.playIndexAtLocked(i, 0)
 		}
 		return
 	}
+	if startPos < 0 || (t.Duration > 0 && startPos >= t.Duration-1) {
+		startPos = 0
+	}
 	p.previewTID = ""
 	p.idx = i
-	p.pos = 0
+	p.pos = startPos
+	p.pendingSeek = startPos
 	p.dur = t.Duration
 	p.counted = false
 	p.loaded = false
 	p.playing = true
 	p.applyVolumeLocked()
-	if err := p.engLoadFile(t.ID, t.Path); err != nil {
+	if err := p.loadAudioLocked(t.ID, t.Path); err != nil {
 		p.onErrorLocked(err)
 	}
 }
@@ -503,17 +730,22 @@ func (p *Player) PlayTracks(ids []string, start int, shuffle bool, playlistID in
 
 func (p *Player) PlayQueueIndex(i int) {
 	p.mu.Lock()
-	p.playIndexLocked(i)
+	if i == p.idx && !p.loaded && p.previewTID == "" {
+		p.playIndexAtLocked(i, p.pos)
+	} else {
+		p.playIndexLocked(i)
+	}
 	p.flush()
 }
 
 func (p *Player) Toggle() {
+	p.syncPosFromEngine()
 	p.mu.Lock()
 	if !p.loaded {
 		if p.previewTID != "" {
 			p.playPreviewLocked(p.previewTID)
 		} else if p.idx >= 0 && p.idx < len(p.items) {
-			p.playIndexLocked(p.idx)
+			p.playIndexAtLocked(p.idx, p.pos)
 		}
 	} else {
 		p.pauseLocked(p.playing)
@@ -527,7 +759,7 @@ func (p *Player) Play() {
 		if p.previewTID != "" {
 			p.playPreviewLocked(p.previewTID)
 		} else if p.idx >= 0 && p.idx < len(p.items) {
-			p.playIndexLocked(p.idx)
+			p.playIndexAtLocked(p.idx, p.pos)
 		}
 	} else {
 		p.pauseLocked(false)
@@ -536,6 +768,7 @@ func (p *Player) Play() {
 }
 
 func (p *Player) Pause() {
+	p.syncPosFromEngine()
 	p.mu.Lock()
 	p.pauseLocked(true)
 	p.flush()
@@ -554,6 +787,7 @@ func (p *Player) Next() {
 }
 
 func (p *Player) Prev() {
+	p.syncPosFromEngine()
 	p.mu.Lock()
 	if p.previewTID != "" {
 		if p.pos > 3 || p.idx < 0 || p.idx >= len(p.items) {
@@ -582,18 +816,31 @@ func (p *Player) Prev() {
 
 func (p *Player) Seek(sec float64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.loaded {
-		return
-	}
 	if sec < 0 {
 		sec = 0
+	}
+	if !p.loaded {
+		if p.previewTID == "" && (p.idx < 0 || p.idx >= len(p.items)) {
+			p.mu.Unlock()
+			return
+		}
+		if p.dur > 0 && sec > p.dur {
+			sec = p.dur
+		}
+		p.pos = sec
+		p.saveStateLocked()
+		st, tr, ok := p.snapshotLocked()
+		p.mu.Unlock()
+		p.publish(st, tr, ok)
+		return
 	}
 	p.engSeek(sec)
 	p.pos = sec
 	p.applyVolumeLocked()
+	p.saveStateLocked()
 	st, tr, ok := p.snapshotLocked()
-	go p.publish(st, tr, ok)
+	p.mu.Unlock()
+	p.publish(st, tr, ok)
 }
 
 func (p *Player) SeekRelative(delta float64) {
@@ -696,7 +943,7 @@ func (p *Player) playPreviewLocked(id string) {
 	p.loaded = false
 	p.playing = true
 	p.applyVolumeLocked()
-	if err := p.engLoadFile(t.ID, t.Path); err != nil {
+	if err := p.loadAudioLocked(t.ID, t.Path); err != nil {
 		p.onErrorLocked(err)
 	}
 }
@@ -718,7 +965,7 @@ func (p *Player) PlayInstant(id string) {
 			if p.previewTID != "" {
 				p.playPreviewLocked(id)
 			} else {
-				p.playIndexLocked(p.idx)
+				p.playIndexAtLocked(p.idx, p.pos)
 			}
 		} else {
 			p.pauseLocked(p.playing)

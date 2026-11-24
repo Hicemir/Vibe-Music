@@ -30,6 +30,7 @@ import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -62,6 +63,8 @@ import com.vibemusic.nativeapp.genre.GenreStatus
 import com.vibemusic.nativeapp.genre.GenreTaxonomy
 import com.vibemusic.nativeapp.player.BiquadEqAudioProcessor
 import com.vibemusic.nativeapp.player.PlaybackService
+import com.vibemusic.nativeapp.sync.SyncPairPrompt
+import com.vibemusic.nativeapp.sync.SyncStatus
 import com.vibemusic.nativeapp.ui.BottomActionSheet
 import com.vibemusic.nativeapp.ui.CoverLoader
 import com.vibemusic.nativeapp.ui.DownloadJobAdapter
@@ -94,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private val scanner by lazy { app.scanner }
     private val ytdlpManager by lazy { app.ytdlpManager }
     private val genreDetector by lazy { app.genreDetector }
+    private val syncManager by lazy { app.syncManager }
 
     // Root views
     private lateinit var contentFrame: FrameLayout
@@ -111,6 +115,11 @@ class MainActivity : AppCompatActivity() {
     private var refreshGenreSettingsData: ((GenreStatus) -> Unit)? = null
     private var genreSummaryTextView: TextView? = null
     private var genreModeTextView: TextView? = null
+    private var syncSummaryTextView: TextView? = null
+    private var libQuickSyncBtn: View? = null
+    private var syncStatusCollectJob: Job? = null
+    private var syncPeersCollectJob: Job? = null
+    private var activePairDialog: AlertDialog? = null
 
     // Mini Player views
     private lateinit var miniCover: ImageView
@@ -144,6 +153,7 @@ class MainActivity : AppCompatActivity() {
     private var isCollectionDetailOpen = false
     private var isHiddenSongsOpen = false
     private var isGenreSettingsOpen = false
+    private var isSyncScreenOpen = false
     private var currentRadioMode = "all"
     private var currentTab = "home"
     private var isUserTrackingSeekbar = false
@@ -308,6 +318,32 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        syncManager.onSyncCompleted = {
+            runOnUiThread {
+                val msg = syncManager.status.value.message
+                if (msg.isNotEmpty()) {
+                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                }
+                updateSyncSummaryLabel()
+                updateLibraryQuickSyncVisibility()
+                tabViews["home"]?.let { populateHomeView(it, refreshOnlineDiscover = false) }
+                refreshLibraryData?.invoke()
+                refreshSearchData?.invoke()
+                refreshSettingsData?.invoke()
+            }
+        }
+
+        lifecycleScope.launch {
+            syncManager.pairPrompt.collectLatest { prompt ->
+                if (prompt != null) {
+                    showIncomingSyncPairDialog(prompt)
+                } else {
+                    activePairDialog?.dismiss()
+                    activePairDialog = null
+                }
+            }
+        }
+
         lifecycleScope.launch {
             ytdlpManager.jobs.collectLatest { jobs ->
                 homeDiscoverAdapter?.updateDownloadJobs(jobs)
@@ -346,6 +382,10 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (isHiddenSongsOpen) {
                     closeHiddenSongsScreen()
+                    return
+                }
+                if (isSyncScreenOpen) {
+                    closeSyncScreen()
                     return
                 }
                 if (isGenreSettingsOpen) {
@@ -476,6 +516,14 @@ class MainActivity : AppCompatActivity() {
         isCollectionDetailOpen = false
         isHiddenSongsOpen = false
         isGenreSettingsOpen = false
+        if (isSyncScreenOpen) {
+            isSyncScreenOpen = false
+            syncStatusCollectJob?.cancel()
+            syncPeersCollectJob?.cancel()
+            syncStatusCollectJob = null
+            syncPeersCollectJob = null
+            syncManager.stopDiscovery()
+        }
         refreshGenreSettingsData = null
         overlayContainer.removeAllViews()
         overlayContainer.visibility = View.GONE
@@ -487,7 +535,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val isSameTab = (tab == currentTab)
-        val hadOverlay = isCollectionDetailOpen || isHiddenSongsOpen || isGenreSettingsOpen
+        val hadOverlay = isCollectionDetailOpen || isHiddenSongsOpen || isGenreSettingsOpen || isSyncScreenOpen
         if (hadOverlay) {
             closeOverlays()
         }
@@ -1727,6 +1775,9 @@ class MainActivity : AppCompatActivity() {
 
         val btnNew = view.findViewById<ImageView>(R.id.lib_btn_new_playlist)
         val btnImport = view.findViewById<ImageView>(R.id.lib_btn_import_m3u)
+        libQuickSyncBtn = view.findViewById(R.id.lib_btn_quick_sync)
+        libQuickSyncBtn?.setOnClickListener { showSyncScreen(autoQuickSync = true) }
+        updateLibraryQuickSyncVisibility()
         val recycler = view.findViewById<RecyclerView>(R.id.recycler_library)
         recycler.layoutManager = GridLayoutManager(this@MainActivity, 2)
 
@@ -1913,6 +1964,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         refreshLibraryData = {
+            updateLibraryQuickSyncVisibility()
             loadLibraryContent()
         }
 
@@ -3005,11 +3057,17 @@ class MainActivity : AppCompatActivity() {
         val versionText = view.findViewById<TextView>(R.id.settings_version_text)
         genreSummaryTextView = view.findViewById(R.id.settings_genre_summary_text)
         genreModeTextView = view.findViewById(R.id.settings_genre_mode_text)
+        syncSummaryTextView = view.findViewById(R.id.settings_sync_summary_text)
+        updateSyncSummaryLabel()
+
+        view.findViewById<View>(R.id.settings_btn_open_sync)?.setOnClickListener {
+            showSyncScreen(autoQuickSync = false)
+        }
 
         val pkgVersion = try {
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "0.6.2"
+            packageManager.getPackageInfo(packageName, 0).versionName ?: "0.7.0"
         } catch (_: Exception) {
-            "0.6.2"
+            "0.7.0"
         }
         versionText?.text = "v$pkgVersion"
         updateGenreSettingsSummaryViews(genreDetector.refreshStatus())
@@ -3130,6 +3188,7 @@ class MainActivity : AppCompatActivity() {
             refreshDirsList()
             refreshHiddenCountAndLabels()
             updateGenreSettingsSummaryViews(genreDetector.refreshStatus())
+            updateSyncSummaryLabel()
         }
 
         refreshDirsList()
@@ -3253,6 +3312,369 @@ class MainActivity : AppCompatActivity() {
         }
 
         return view
+    }
+
+    private fun updateLibraryQuickSyncVisibility() {
+        val btn = libQuickSyncBtn ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val synced = store.hasSyncedBefore()
+            withContext(Dispatchers.Main) {
+                btn.visibility = if (synced) View.VISIBLE else View.GONE
+            }
+        }
+    }
+
+    private fun updateSyncSummaryLabel() {
+        val tv = syncSummaryTextView ?: return
+        lifecycleScope.launch(Dispatchers.IO) {
+            val peers = store.listTrustedSyncPeers()
+            val text = if (peers.isEmpty()) {
+                "Transfer songs, playlists, favorites & play counts directly over Wi‑Fi"
+            } else {
+                val p = peers.first()
+                val whenStr = if (p.lastSyncAt > 0L) {
+                    val diff = ((System.currentTimeMillis() / 1000L) - p.lastSyncAt).coerceAtLeast(0L)
+                    when {
+                        diff < 60 -> "just now"
+                        diff < 3600 -> "${diff / 60}m ago"
+                        diff < 86400 -> "${diff / 3600}h ago"
+                        else -> "${diff / 86400}d ago"
+                    }
+                } else "paired"
+                "Paired with ${p.deviceName.ifEmpty { "PC" }} • $whenStr"
+            }
+            withContext(Dispatchers.Main) {
+                tv.text = text
+            }
+        }
+    }
+
+    private fun showIncomingSyncPairDialog(prompt: SyncPairPrompt) {
+        activePairDialog?.dismiss()
+        val pinFormatted = if (prompt.pin.length == 6) {
+            "${prompt.pin.substring(0, 3)} ${prompt.pin.substring(3)}"
+        } else {
+            prompt.pin
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val pad = 20.dpToPx()
+            setPadding(pad, 12.dpToPx(), pad, 4.dpToPx())
+        }
+        val desc = TextView(this).apply {
+            val countPart = if (prompt.trackCount > 0) " (${prompt.trackCount} songs)" else ""
+            text = "${prompt.deviceName}$countPart wants to sync with your library.\n\nVerify this 6-digit PIN matches:"
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+            textSize = 13f
+        }
+        val pinTxt = TextView(this).apply {
+            text = pinFormatted
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.accent_green))
+            textSize = 28f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(0, 14.dpToPx(), 0, 14.dpToPx())
+        }
+        val trustCb = CheckBox(this).apply {
+            text = "Trust this device automatically (1-tap sync next time)"
+            isChecked = prompt.trustedDefault
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+            textSize = 13f
+        }
+        box.addView(desc)
+        box.addView(pinTxt)
+        box.addView(trustCb)
+
+        var handled = false
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("LAN Sync Request")
+            .setView(box)
+            .setPositiveButton("Accept & Sync") { _, _ ->
+                handled = true
+                syncManager.respondPair(prompt.pairId, accept = true, trust = trustCb.isChecked)
+            }
+            .setNegativeButton("Decline") { _, _ ->
+                handled = true
+                syncManager.respondPair(prompt.pairId, accept = false, trust = false)
+            }
+            .setOnDismissListener {
+                if (!handled) {
+                    syncManager.respondPair(prompt.pairId, accept = false, trust = false)
+                }
+                if (activePairDialog === it) {
+                    activePairDialog = null
+                }
+            }
+            .create()
+        activePairDialog = dialog
+        dialog.show()
+    }
+
+    private fun closeSyncScreen() {
+        isSyncScreenOpen = false
+        syncStatusCollectJob?.cancel()
+        syncPeersCollectJob?.cancel()
+        syncStatusCollectJob = null
+        syncPeersCollectJob = null
+        syncManager.stopDiscovery()
+        overlayContainer.removeAllViews()
+        overlayContainer.visibility = View.GONE
+        refreshSettingsData?.invoke()
+        updateLibraryQuickSyncVisibility()
+    }
+
+    private fun showSyncScreen(autoQuickSync: Boolean) {
+        isSyncScreenOpen = true
+        syncStatusCollectJob?.cancel()
+        syncPeersCollectJob?.cancel()
+        overlayContainer.removeAllViews()
+        val view = layoutInflater.inflate(R.layout.screen_sync, overlayContainer, false)
+        overlayContainer.addView(view)
+        overlayContainer.visibility = View.VISIBLE
+
+        val backBtn = view.findViewById<View>(R.id.sync_back_btn)
+        val connectIpBtn = view.findViewById<View>(R.id.sync_connect_ip_btn)
+        val selfNameTv = view.findViewById<TextView>(R.id.sync_self_name)
+        val selfInfoTv = view.findViewById<TextView>(R.id.sync_self_info)
+        val renameBtn = view.findViewById<View>(R.id.sync_rename_btn)
+        val switchDeletions = view.findViewById<SwitchCompat>(R.id.sync_switch_deletions)
+
+        val statusCard = view.findViewById<View>(R.id.sync_status_card)
+        val statusTitle = view.findViewById<TextView>(R.id.sync_status_title)
+        val statusPhase = view.findViewById<TextView>(R.id.sync_status_phase)
+        val cancelBtn = view.findViewById<View>(R.id.sync_cancel_btn)
+        val pinContainer = view.findViewById<View>(R.id.sync_pin_container)
+        val pinCodeTv = view.findViewById<TextView>(R.id.sync_pin_code)
+        val progressBar = view.findViewById<ProgressBar>(R.id.sync_progress_bar)
+        val progressDetail = view.findViewById<TextView>(R.id.sync_progress_detail)
+
+        val peersEmpty = view.findViewById<View>(R.id.sync_peers_empty)
+        val peersContainer = view.findViewById<LinearLayout>(R.id.sync_peers_container)
+        val trustedSection = view.findViewById<View>(R.id.sync_trusted_section)
+        val trustedContainer = view.findViewById<LinearLayout>(R.id.sync_trusted_container)
+
+        fun refreshSelfHeader() {
+            lifecycleScope.launch(Dispatchers.IO) {
+                val info = syncManager.getSelfInfo()
+                val ipPart = if (info.localIps.isNotEmpty()) " • ${info.localIps.first()}:${info.port}" else ""
+                withContext(Dispatchers.Main) {
+                    selfNameTv.text = info.deviceName
+                    selfInfoTv.text = "${info.trackCount} songs • ${info.playlistCount} playlists$ipPart"
+                }
+            }
+        }
+
+        fun refreshTrustedList() {
+            lifecycleScope.launch(Dispatchers.IO) {
+                val trusted = store.listTrustedSyncPeers()
+                withContext(Dispatchers.Main) {
+                    trustedContainer.removeAllViews()
+                    if (trusted.isEmpty()) {
+                        trustedSection.visibility = View.GONE
+                        return@withContext
+                    }
+                    trustedSection.visibility = View.VISIBLE
+                    for (tp in trusted) {
+                        val row = layoutInflater.inflate(R.layout.item_sync_peer, trustedContainer, false)
+                        val icon = row.findViewById<ImageView>(R.id.sync_peer_icon)
+                        val nameTv = row.findViewById<TextView>(R.id.sync_peer_name)
+                        val trustedIcon = row.findViewById<ImageView>(R.id.sync_peer_trusted_icon)
+                        val metaTv = row.findViewById<TextView>(R.id.sync_peer_meta)
+                        val btn = row.findViewById<TextView>(R.id.sync_peer_btn)
+
+                        icon.setImageResource(if (tp.platform == "android") R.drawable.ic_album else R.drawable.ic_devices)
+                        nameTv.text = tp.deviceName.ifEmpty { tp.deviceId.take(8) }
+                        trustedIcon.visibility = View.VISIBLE
+                        val whenStr = if (tp.lastSyncAt > 0L) {
+                            val diff = ((System.currentTimeMillis() / 1000L) - tp.lastSyncAt).coerceAtLeast(0L)
+                            when {
+                                diff < 60 -> "Just now"
+                                diff < 3600 -> "${diff / 60}m ago"
+                                diff < 86400 -> "${diff / 3600}h ago"
+                                else -> "${diff / 86400}d ago"
+                            }
+                        } else "Paired, never synced"
+                        metaTv.text = "${tp.platform} • Last synced: $whenStr"
+                        btn.text = "Forget"
+                        btn.setBackgroundResource(R.drawable.bg_thin_button)
+                        btn.setTextColor(ContextCompat.getColor(this@MainActivity, R.color.accent_red))
+                        btn.setOnClickListener {
+                            syncManager.removeTrustedPeer(tp.deviceId)
+                            refreshTrustedList()
+                            updateSyncSummaryLabel()
+                            updateLibraryQuickSyncVisibility()
+                        }
+                        trustedContainer.addView(row)
+                    }
+                }
+            }
+        }
+
+        fun renderStatus(st: SyncStatus) {
+            val busy = st.state == "syncing" || st.state == "pairing"
+            switchDeletions.isEnabled = !busy
+            if (st.state == "idle" || st.state == "discovering") {
+                statusCard.visibility = View.GONE
+                return
+            }
+            statusCard.visibility = View.VISIBLE
+            statusTitle.text = when (st.state) {
+                "pairing" -> "Pairing with ${st.peerName}"
+                "syncing" -> "Syncing with ${st.peerName}"
+                "done" -> "Sync Complete"
+                "error" -> "Sync Failed"
+                else -> st.peerName
+            }
+            statusTitle.setTextColor(
+                ContextCompat.getColor(
+                    this,
+                    when (st.state) {
+                        "done" -> R.color.accent_green
+                        "error" -> R.color.accent_red
+                        else -> R.color.text_primary
+                    }
+                )
+            )
+            statusPhase.text = when {
+                st.state == "error" && st.error.isNotEmpty() -> st.error
+                st.state == "done" && st.message.isNotEmpty() -> st.message
+                else -> st.phase
+            }
+            cancelBtn.visibility = if (busy) View.VISIBLE else View.GONE
+
+            if (st.state == "pairing" && st.pin.isNotEmpty()) {
+                pinContainer.visibility = View.VISIBLE
+                pinCodeTv.text = if (st.pin.length == 6) "${st.pin.substring(0, 3)} ${st.pin.substring(3)}" else st.pin
+            } else {
+                pinContainer.visibility = View.GONE
+            }
+
+            if (st.state == "syncing") {
+                progressBar.visibility = View.VISIBLE
+                progressBar.isIndeterminate = st.totalBytes <= 0L && st.filesTotal <= 0
+                progressBar.progress = st.percent.coerceIn(0, 100)
+                val parts = mutableListOf<String>()
+                if (st.currentFile.isNotEmpty()) parts.add(st.currentFile)
+                val metrics = mutableListOf<String>()
+                if (st.totalBytes > 0L) metrics.add("${formatBytes(st.transferredBytes)} / ${formatBytes(st.totalBytes)}")
+                if (st.filesTotal > 0) metrics.add("${st.filesDone}/${st.filesTotal} files")
+                if (st.speedBps > 0L) metrics.add("${formatBytes(st.speedBps)}/s")
+                if (metrics.isNotEmpty()) parts.add(metrics.joinToString(" • "))
+                if (parts.isNotEmpty()) {
+                    progressDetail.visibility = View.VISIBLE
+                    progressDetail.text = parts.joinToString("\n")
+                } else {
+                    progressDetail.visibility = View.GONE
+                }
+            } else {
+                progressBar.visibility = View.GONE
+                progressDetail.visibility = View.GONE
+            }
+
+            if (st.state == "done") {
+                refreshSelfHeader()
+                refreshTrustedList()
+            }
+        }
+
+        backBtn.setOnClickListener { closeSyncScreen() }
+        cancelBtn.setOnClickListener { syncManager.cancelSync() }
+
+        renameBtn.setOnClickListener {
+            val input = EditText(this).apply {
+                setText(selfNameTv.text.toString())
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+                setSelection(text.length)
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Rename This Device")
+                .setView(input)
+                .setPositiveButton("Save") { _, _ ->
+                    val clean = input.text.toString().trim()
+                    if (clean.isNotEmpty()) {
+                        syncManager.renameDevice(clean)
+                        refreshSelfHeader()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        connectIpBtn.setOnClickListener {
+            val input = EditText(this).apply {
+                hint = "PC IP (e.g. 192.168.1.10)"
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_primary))
+                setHintTextColor(ContextCompat.getColor(this@MainActivity, R.color.text_secondary))
+            }
+            AlertDialog.Builder(this)
+                .setTitle("Connect by IP")
+                .setView(input)
+                .setPositiveButton("Find Device") { _, _ ->
+                    val addr = input.text.toString().trim()
+                    if (addr.isNotEmpty()) {
+                        lifecycleScope.launch {
+                            val res = syncManager.connectManualIp(addr)
+                            res.onSuccess { p ->
+                                Toast.makeText(this@MainActivity, "Found ${p.deviceName}", Toast.LENGTH_SHORT).show()
+                            }.onFailure { err ->
+                                Toast.makeText(this@MainActivity, "Connect failed: ${err.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        syncStatusCollectJob = lifecycleScope.launch {
+            syncManager.status.collectLatest { st ->
+                renderStatus(st)
+            }
+        }
+
+        syncPeersCollectJob = lifecycleScope.launch {
+            syncManager.peers.collectLatest { peers ->
+                peersContainer.removeAllViews()
+                if (peers.isEmpty()) {
+                    peersEmpty.visibility = View.VISIBLE
+                    return@collectLatest
+                }
+                peersEmpty.visibility = View.GONE
+                val busy = syncManager.status.value.let { it.state == "syncing" || it.state == "pairing" }
+                for (peer in peers) {
+                    val row = layoutInflater.inflate(R.layout.item_sync_peer, peersContainer, false)
+                    val icon = row.findViewById<ImageView>(R.id.sync_peer_icon)
+                    val nameTv = row.findViewById<TextView>(R.id.sync_peer_name)
+                    val trustedIcon = row.findViewById<ImageView>(R.id.sync_peer_trusted_icon)
+                    val metaTv = row.findViewById<TextView>(R.id.sync_peer_meta)
+                    val btn = row.findViewById<TextView>(R.id.sync_peer_btn)
+
+                    icon.setImageResource(if (peer.platform == "android") R.drawable.ic_album else R.drawable.ic_devices)
+                    nameTv.text = peer.deviceName.ifEmpty { "VibeMusic Device" }
+                    trustedIcon.visibility = if (peer.trusted) View.VISIBLE else View.GONE
+                    metaTv.text = "${peer.trackCount} songs • ${peer.playlistCount} playlists • ${peer.ip}:${peer.port}"
+                    btn.isEnabled = !busy
+                    btn.alpha = if (busy) 0.5f else 1.0f
+                    btn.text = "Sync"
+                    btn.setOnClickListener {
+                        val err = syncManager.startPeerSync(peer.deviceId, switchDeletions.isChecked)
+                        if (err.isNotEmpty()) {
+                            Toast.makeText(this@MainActivity, err, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    peersContainer.addView(row)
+                }
+            }
+        }
+
+        refreshSelfHeader()
+        refreshTrustedList()
+        syncManager.startDiscovery(autoQuickSync = autoQuickSync, syncDeletions = switchDeletions.isChecked)
+        lifecycleScope.launch {
+            delay(200L)
+            if (isSyncScreenOpen) refreshSelfHeader()
+        }
     }
 
     private fun closeHiddenSongsScreen() {

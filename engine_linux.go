@@ -29,7 +29,6 @@ func (p *Player) initEngine(set Settings) error {
 		return fmt.Errorf("libmpv init: %w", err)
 	}
 	p.eng = &audioEngine{m: m}
-	_ = m.ObserveProperty(1, "time-pos", mpv.FormatDouble)
 	_ = m.ObserveProperty(2, "duration", mpv.FormatDouble)
 	_ = m.ObserveProperty(3, "pause", mpv.FormatFlag)
 
@@ -87,6 +86,18 @@ func (p *Player) engSetVolume(vol float64) {
 	_ = p.eng.m.SetPropertyString("volume", fmt.Sprintf("%.1f", vol))
 }
 
+func (p *Player) engPosition() (float64, bool) {
+	if p.eng == nil || p.eng.m == nil {
+		return 0, false
+	}
+	v, err := p.eng.m.GetProperty("time-pos", mpv.FormatDouble)
+	if err != nil {
+		return 0, false
+	}
+	pos, ok := v.(float64)
+	return pos, ok
+}
+
 func (p *Player) engSetFilters(set Settings) {
 	if p.eng == nil || p.eng.m == nil {
 		return
@@ -130,10 +141,6 @@ func (p *Player) eventLoop() {
 			pr := ev.Property()
 			p.mu.Lock()
 			switch pr.Name {
-			case "time-pos":
-				if v, ok := pr.Data.(float64); ok {
-					p.pos = v
-				}
 			case "duration":
 				if v, ok := pr.Data.(float64); ok && v > 0 {
 					p.dur = v
@@ -152,7 +159,21 @@ func (p *Player) eventLoop() {
 			p.mu.Lock()
 			p.loaded = true
 			p.errStreak = 0
+			seekTo := p.pendingSeek
+			p.pendingSeek = 0
+			if seekTo > 0 {
+				if p.dur > 0 && seekTo >= p.dur {
+					seekTo = p.dur - 0.5
+					if seekTo < 0 {
+						seekTo = 0
+					}
+				}
+				p.pos = seekTo
+				p.seekAudioLocked(seekTo)
+			}
+			st, tr, ok := p.snapshotLocked()
 			p.mu.Unlock()
+			p.publish(st, tr, ok)
 		case mpv.EventEnd:
 			ef := ev.EndFile()
 			switch ef.Reason {
@@ -165,6 +186,7 @@ func (p *Player) eventLoop() {
 			default:
 				continue
 			}
+			p.saveStateLocked()
 			st, tr, ok := p.snapshotLocked()
 			qs := p.queueLocked()
 			p.mu.Unlock()

@@ -18,7 +18,7 @@
   }
 
   function onSeekWheel(e: WheelEvent) {
-    if (!p.loaded) return
+    if (!p.loaded && !p.trackId) return
     const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? -e.deltaY : e.deltaX
     if (delta === 0) return
     e.preventDefault()
@@ -99,7 +99,7 @@
     </div>
     <div class="pb-seek" onwheel={onSeekWheel}>
       <span class="tm l">{fmtTime(core.position)}</span>
-      <Slider value={core.position} max={core.duration || 1} disabled={!p.loaded} onchange={(v) => Go.Seek(v)} />
+      <Slider value={core.position} max={core.duration || 1} disabled={!p.loaded && !p.trackId} onchange={(v) => Go.Seek(v)} />
       <span class="tm r">{fmtTime(core.duration)}</span>
     </div>
   </div>

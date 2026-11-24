@@ -38,6 +38,12 @@
     <button class="nav-item" class:active={active('albums', 'album')} onclick={() => core.go({ name: 'albums' })}><Icon name="album" size={22} />Albums</button>
     <button class="nav-item" class:active={active('artists', 'artist')} onclick={() => core.go({ name: 'artists' })}><Icon name="person" size={22} />Artists</button>
     <button class="nav-item" class:active={active('downloads')} onclick={() => core.go({ name: 'downloads' })}><Icon name="download" size={22} />Download</button>
+    <button class="nav-item" class:active={active('sync')} onclick={() => core.go({ name: 'sync' })}>
+      <Icon name="sync" size={22} />Sync
+      {#if core.syncStatus.state === 'syncing' || core.syncStatus.state === 'pairing'}
+        <span class="sync-nav-dot" title="Sync in progress"></span>
+      {/if}
+    </button>
     <button class="nav-item" class:active={active('settings')} onclick={() => core.go({ name: 'settings' })}><Icon name="settings" size={22} />Settings</button>
   </div>
   <div class="box lib">

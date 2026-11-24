@@ -214,9 +214,81 @@ export interface Lyrics {
   lines: { time: number; text: string }[] | null
 }
 
+export interface SyncPeer {
+  deviceId: string
+  deviceName: string
+  platform: string
+  ip: string
+  port: number
+  trackCount: number
+  playlistCount: number
+  pubKeySpkiB64: string
+  trusted: boolean
+  lastSeen: number
+}
+
+export interface TrustedSyncPeer {
+  deviceId: string
+  deviceName: string
+  platform: string
+  pubKeySpkiB64: string
+  pairedAt: number
+  lastSyncAt: number
+}
+
+export interface SyncPairPrompt {
+  pairId: string
+  deviceId: string
+  deviceName: string
+  platform: string
+  trackCount: number
+  pin: string
+  trustedDefault: boolean
+  incoming: boolean
+}
+
+export interface SyncStatus {
+  state: 'idle' | 'discovering' | 'pairing' | 'syncing' | 'done' | 'error' | string
+  phase: string
+  peerId: string
+  peerName: string
+  direction: string
+  pin: string
+  percent: number
+  currentFile: string
+  transferredBytes: number
+  totalBytes: number
+  filesDone: number
+  filesTotal: number
+  speedBps: number
+  addedTracks: number
+  updatedTracks: number
+  deletedTracks: number
+  syncedPlaylists: number
+  error: string
+  message: string
+}
+
+export interface SyncSelfInfo {
+  deviceId: string
+  deviceName: string
+  platform: string
+  port: number
+  localIps: string[]
+  trackCount: number
+  playlistCount: number
+}
+
+export interface SyncStateResponse {
+  self: SyncSelfInfo
+  status: SyncStatus
+  peers: SyncPeer[]
+  prompt: SyncPairPrompt | null
+}
+
 export type RouteName =
   | 'home' | 'search' | 'playlists' | 'playlist' | 'liked' | 'recent' | 'mostplayed' | 'allsongs'
-  | 'albums' | 'album' | 'artists' | 'artist' | 'artistradio' | 'quickpick' | 'downloads' | 'settings'
+  | 'albums' | 'album' | 'artists' | 'artist' | 'artistradio' | 'quickpick' | 'downloads' | 'sync' | 'settings'
 
 export interface Route {
   name: RouteName

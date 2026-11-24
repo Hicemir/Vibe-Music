@@ -143,6 +143,7 @@ static gboolean vm_on_button_release(GtkWidget *widget, GdkEventButton *event, g
 
 static gboolean vm_on_motion(GtkWidget *widget, GdkEventMotion *event, gpointer data) {
 	if (!event) return FALSE;
+	if (!vm_drag_armed && (vm_saved_max || vm_mini_mode) && !vm_edge_cursor_active) return FALSE;
 	GtkWindow *win = vm_find_window();
 	if (!win) return FALSE;
 
@@ -713,6 +714,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -829,6 +832,20 @@ func nativeClearYtMusicCookies() {
 }
 
 func setCmdHidden(_ *exec.Cmd) {}
+
+func configureManagedCmd(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+}
 
 // ensureDesktopIntegration installs the icon and .desktop entry into ~/.local/share
 // so Wayland compositors (KWin/Mutter) show our icon in the titlebar & taskbar and KRunner indexes "Vibe Music".

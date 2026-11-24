@@ -11,7 +11,7 @@
   }: { id?: string; ids?: string[] | null; icon?: string; class?: string; size?: number } = $props()
   let failedId = $state('')
   const failed = $derived(!!id && failedId === id)
-  const cellSize = $derived(size ? Math.min(size, 300) : 300)
+  const cellSize = $derived(size > 0 && size <= 128 ? 128 : 300)
   const singleDim = $derived(size || 600)
 </script>
 

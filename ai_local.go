@@ -596,7 +596,7 @@ func (m *LocalAIManager) downloadToFile(ctx context.Context, client *http.Client
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "VibeMusic/0.6")
+	req.Header.Set("User-Agent", "VibeMusic/0.7")
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
@@ -707,7 +707,7 @@ func (m *LocalAIManager) Download(modelID string, useGPU bool) string {
 				m.setState("error", "", 0, 0, "", err.Error())
 				return
 			}
-			req.Header.Set("User-Agent", "VibeMusic/0.6")
+			req.Header.Set("User-Agent", "VibeMusic/0.7")
 			req.Header.Set("Accept", "application/vnd.github+json")
 			resp, err := client.Do(req)
 			if err != nil {

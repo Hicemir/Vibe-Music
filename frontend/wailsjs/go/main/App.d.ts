@@ -16,6 +16,8 @@ export function CancelGenreDetection():Promise<void>;
 
 export function CancelLocalAIDownload():Promise<void>;
 
+export function CancelSync():Promise<void>;
+
 export function ClearDownloads():Promise<void>;
 
 export function ClearPendingAI():Promise<void>;
@@ -23,6 +25,8 @@ export function ClearPendingAI():Promise<void>;
 export function ClearQueue():Promise<void>;
 
 export function CloseWindow():Promise<void>;
+
+export function ConnectSyncManualIP(arg1:string):Promise<main.SyncManualConnectResult>;
 
 export function CountMovable(arg1:Array<string>,arg2:string):Promise<Array<number>>;
 
@@ -78,7 +82,11 @@ export function GetQueue():Promise<Record<string, any>>;
 
 export function GetSettings():Promise<main.Settings>;
 
+export function GetSyncState():Promise<main.SyncStateResponse>;
+
 export function GetTracks():Promise<Array<main.Track>>;
+
+export function GetTrustedSyncPeers():Promise<Array<main.TrustedSyncPeer>>;
 
 export function GetVersion():Promise<string>;
 
@@ -136,11 +144,17 @@ export function QuitApp():Promise<void>;
 
 export function RedetectGenres():Promise<void>;
 
+export function RemoveFromPlaylist(arg1:number,arg2:Array<string>):Promise<number>;
+
 export function RemoveFromQueue(arg1:number):Promise<void>;
+
+export function RemoveTrustedSyncPeer(arg1:string):Promise<void>;
 
 export function RenamePlaylist(arg1:number,arg2:string):Promise<void>;
 
 export function Rescan():Promise<void>;
+
+export function RespondSyncPair(arg1:string,arg2:boolean,arg3:boolean):Promise<void>;
 
 export function Resume():Promise<void>;
 
@@ -160,6 +174,8 @@ export function SetShuffle(arg1:boolean):Promise<void>;
 
 export function SetSleepTimer(arg1:number):Promise<void>;
 
+export function SetSyncDeviceName(arg1:string):Promise<main.SyncStateResponse>;
+
 export function SetTracksGenre(arg1:Array<string>,arg2:Array<string>):Promise<void>;
 
 export function SetVolume(arg1:number):Promise<void>;
@@ -174,7 +190,13 @@ export function StartDownload(arg1:string,arg2:string):Promise<string>;
 
 export function StartDownloadToPlaylist(arg1:string,arg2:number):Promise<string>;
 
+export function StartPeerSync(arg1:string,arg2:boolean):Promise<string>;
+
+export function StartSyncDiscovery():Promise<string>;
+
 export function StartYtMusicLogin():Promise<void>;
+
+export function StopSyncDiscovery():Promise<void>;
 
 export function SyncYtMusicLibrary():Promise<string>;
 

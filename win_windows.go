@@ -5,6 +5,7 @@ package main
 import (
 	_ "embed"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -145,4 +146,23 @@ func setCmdHidden(cmd *exec.Cmd) {
 	if cmd != nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	}
+}
+
+func configureManagedCmd(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	setCmdHidden(cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		tk := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
+		setCmdHidden(tk)
+		if err := tk.Run(); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
 }

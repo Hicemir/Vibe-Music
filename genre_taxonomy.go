@@ -275,11 +275,23 @@ func getGenreTaxonomy() GenreTaxonomy {
 	return GenreTaxonomy{Nodes: genreNodes, Links: genreLinks, Clashes: genreClashes}
 }
 
+type genreLinkTarget struct {
+	to string
+	w  float64
+}
+
 var (
-	genreParent  = map[string]string{}
-	genreKnown   = map[string]bool{}
-	genreByLower = map[string]string{}
-	aliasList    []aliasEntry
+	genreParent    = map[string]string{}
+	genreKnown     = map[string]bool{}
+	genreByLower   = map[string]string{}
+	aliasList      []aliasEntry
+	genreLinkMap   = map[string][]genreLinkTarget{}
+	genreClashMap  = map[string]map[string]float64{}
+	expandedGenres = map[string]map[string]float64{}
+	contextGenres  = map[string]bool{
+		"Soundtrack": true, "Film Score": true, "Video Game Music": true,
+		"Anime": true, "TV Soundtrack": true, "Musical Theatre": true, "Instrumental": true,
+	}
 )
 
 type aliasEntry struct {
@@ -310,6 +322,40 @@ func init() {
 		}
 		return len(aliasList[i].phrase) > len(aliasList[j].phrase)
 	})
+	for _, l := range genreLinks {
+		genreLinkMap[l.A] = append(genreLinkMap[l.A], genreLinkTarget{to: l.B, w: l.W})
+		genreLinkMap[l.B] = append(genreLinkMap[l.B], genreLinkTarget{to: l.A, w: l.W})
+	}
+	for _, c := range genreClashes {
+		if genreClashMap[c.A] == nil {
+			genreClashMap[c.A] = map[string]float64{}
+		}
+		if genreClashMap[c.B] == nil {
+			genreClashMap[c.B] = map[string]float64{}
+		}
+		if c.W > genreClashMap[c.A][c.B] {
+			genreClashMap[c.A][c.B] = c.W
+		}
+		if c.W > genreClashMap[c.B][c.A] {
+			genreClashMap[c.B][c.A] = c.W
+		}
+	}
+	for _, n := range genreNodes {
+		m := map[string]float64{}
+		w := 1.0
+		for cur, guard := n.Name, 0; cur != "" && guard < 6; cur, guard = genreParent[cur], guard+1 {
+			if m[cur] < w {
+				m[cur] = w
+			}
+			for _, link := range genreLinkMap[cur] {
+				if m[link.to] < w*link.w {
+					m[link.to] = w * link.w
+				}
+			}
+			w *= 0.6
+		}
+		expandedGenres[n.Name] = m
+	}
 }
 
 var tagReplacer = strings.NewReplacer("-", " ", "_", " ", ".", " ", "/", " ", ",", " ", "'", "", "’", "", "&", " and ", "(", " ", ")", " ", ":", " ")
@@ -481,4 +527,144 @@ func heuristicGenres(t Track) []string {
 		out = append(out, "Children's")
 	}
 	return dedupeGenres(out, 5)
+}
+
+func pairPosSimGo(ga, gb string) float64 {
+	ea := expandedGenres[ga]
+	eb := expandedGenres[gb]
+	if ea == nil || eb == nil {
+		if ga != "" && strings.EqualFold(ga, gb) {
+			return 1.0
+		}
+		return 0
+	}
+	best := 0.0
+	for node, wa := range ea {
+		if wb, ok := eb[node]; ok && wa*wb > best {
+			best = wa * wb
+		}
+	}
+	return best
+}
+
+func pairClashGo(ga, gb string) float64 {
+	if pairPosSimGo(ga, gb) >= 0.15 {
+		return 0
+	}
+	best := 0.0
+	wa := 1.0
+	for curA, gaGuard := ga, 0; curA != "" && gaGuard < 6; curA, gaGuard = genreParent[curA], gaGuard+1 {
+		if mapA := genreClashMap[curA]; mapA != nil {
+			wb := 1.0
+			for curB, gbGuard := gb, 0; curB != "" && gbGuard < 6; curB, gbGuard = genreParent[curB], gbGuard+1 {
+				if cw, ok := mapA[curB]; ok && wa*wb*cw > best {
+					best = wa * wb * cw
+				}
+				wb *= 0.92
+			}
+		}
+		wa *= 0.92
+	}
+	return best
+}
+
+func genreClashGo(a, b []string) float64 {
+	var styleA, styleB []string
+	for _, g := range a {
+		if !contextGenres[g] {
+			styleA = append(styleA, g)
+		}
+	}
+	for _, g := range b {
+		if !contextGenres[g] {
+			styleB = append(styleB, g)
+		}
+	}
+	if len(styleA) == 0 || len(styleB) == 0 {
+		return 0
+	}
+	best := 0.0
+	for _, ga := range styleA {
+		matchedOther := false
+		for _, y := range styleB {
+			if pairPosSimGo(ga, y) >= 0.5 {
+				matchedOther = true
+				break
+			}
+		}
+		if matchedOther {
+			continue
+		}
+		for _, gb := range styleB {
+			matchedSelf := false
+			for _, x := range styleA {
+				if pairPosSimGo(x, gb) >= 0.5 {
+					matchedSelf = true
+					break
+				}
+			}
+			if matchedSelf {
+				continue
+			}
+			if c := pairClashGo(ga, gb); c > best {
+				best = c
+			}
+		}
+	}
+	return best
+}
+
+func genreSimGo(a, b []string) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	rawPos := 0.0
+	var styleA, styleB, ctxA, ctxB []string
+	for _, ga := range a {
+		if contextGenres[ga] {
+			ctxA = append(ctxA, ga)
+		} else {
+			styleA = append(styleA, ga)
+		}
+		for _, gb := range b {
+			if p := pairPosSimGo(ga, gb); p > rawPos {
+				rawPos = p
+			}
+		}
+	}
+	for _, gb := range b {
+		if contextGenres[gb] {
+			ctxB = append(ctxB, gb)
+		} else {
+			styleB = append(styleB, gb)
+		}
+	}
+	stylePos := 0.0
+	for _, ga := range styleA {
+		for _, gb := range styleB {
+			if p := pairPosSimGo(ga, gb); p > stylePos {
+				stylePos = p
+			}
+		}
+	}
+	ctxPos := 0.0
+	for _, ga := range ctxA {
+		for _, gb := range ctxB {
+			if p := pairPosSimGo(ga, gb); p > ctxPos {
+				ctxPos = p
+			}
+		}
+	}
+	basePos := rawPos
+	if len(styleA) > 0 && len(styleB) > 0 && len(ctxA) > 0 && len(ctxB) > 0 {
+		basePos = stylePos*0.75 + ctxPos*0.25
+	} else if len(styleA) > 0 && len(styleB) > 0 && stylePos > basePos {
+		basePos = stylePos
+	}
+	clash := genreClashGo(a, b)
+	res := basePos - clash*0.9
+	if res < 0 {
+		return 0
+	}
+	return res
 }

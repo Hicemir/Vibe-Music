@@ -21,12 +21,25 @@ export function coverUrl(id: string, size?: number): string {
   return size ? `/cover/${id}?s=${size}` : `/cover/${id}`
 }
 
+export function discoverThumbUrl(videoId: string, thumbUrl: string): string {
+  if (videoId && /^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    return thumbUrl ? `/ytthumb/${videoId}?u=${encodeURIComponent(thumbUrl)}` : `/ytthumb/${videoId}`
+  }
+  return thumbUrl
+}
+
 export function fallbackYtThumb(e: Event) {
   const img = e.currentTarget as HTMLImageElement | null
   if (!img) return
   if (e.type === 'load' && !(img.naturalWidth > 0 && img.naturalWidth <= 120)) return
+  const step = Number(img.dataset.thumbFallback || '0')
+  if (step >= 2) return
+  img.dataset.thumbFallback = String(step + 1)
   const src = img.currentSrc || img.src
-  if (src.includes('/maxresdefault.jpg')) {
+  const ytMatch = src.match(/\/ytthumb\/([A-Za-z0-9_-]{11})/)
+  if (ytMatch) {
+    img.src = `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`
+  } else if (src.includes('/maxresdefault.jpg')) {
     img.src = src.replace('/maxresdefault.jpg', '/sddefault.jpg')
   } else if (src.includes('/sddefault.jpg')) {
     img.src = src.replace('/sddefault.jpg', '/hqdefault.jpg')
@@ -326,16 +339,42 @@ export function effectiveGenres(t: Track, all: Track[]): string[] {
   return sorted.filter((e) => e[1] >= sorted[0][1] * 0.5).slice(0, 3).map((e) => e[0])
 }
 
+function seededRand(id: string, seed: number): number {
+  let h = (hashId(id) ^ Math.imul((seed + 1) | 0, 0x9e3779b1)) >>> 0
+  h ^= h >>> 16
+  h = Math.imul(h, 0x85ebca6b) >>> 0
+  h ^= h >>> 13
+  h = Math.imul(h, 0xc2b2ae35) >>> 0
+  h ^= h >>> 16
+  return (h >>> 0) / 4294967295
+}
+
+export interface PlaylistRecommendOptions {
+  /** Current refresh step (0 = initial load, 1+ = user clicked Refresh). */
+  refreshStep?: number
+  /** Map of trackId -> refreshStep when the track was last shown in suggestions. */
+  lastShown?: ReadonlyMap<string, number>
+  /** Map of trackId -> number of times the track was shown in suggestions this session. */
+  shownCount?: ReadonlyMap<string, number>
+  /** Consecutive refreshes a shown track sits out before becoming eligible again (default 3 -> earliest reappear on refresh +4). */
+  cooldown?: number
+}
+
 export function recommendForPlaylist(
   playlistTracks: Track[],
   allTracks: Track[],
   seed = 0,
   limit = 8,
   playlistTrackMap: Record<number, string[]> = {},
+  options: PlaylistRecommendOptions = {},
 ): Track[] {
   const inPlaylist = new Set(playlistTracks.map((t) => t.id))
   const candidates = allTracks.filter((t) => !inPlaylist.has(t.id))
   if (candidates.length === 0) return []
+
+  const refreshStep = options.refreshStep ?? (seed > 0 ? seed : 0)
+  const isRefresh = refreshStep > 0
+  const cooldown = options.cooldown ?? 3
 
   const artistFreq = new Map<string, number>()
   const albumFreq = new Map<string, number>()
@@ -399,23 +438,27 @@ export function recommendForPlaylist(
     let artistScore = 0
     for (const a of splitArtists(c.artist)) {
       const f = artistFreq.get(norm(a))
-      if (f) artistScore += 120 * Math.min(f, 3)
+      if (f) {
+        artistScore += isRefresh ? 75 + 30 * Math.min(f - 1, 2) : 120 * Math.min(f, 3)
+      }
     }
-    artistScore = Math.min(artistScore, 360)
+    artistScore = Math.min(artistScore, isRefresh ? 150 : 360)
 
     let albumScore = 0
     if (c.album) {
       const f = albumFreq.get(norm(c.album))
-      if (f) albumScore = Math.min(285, 95 * Math.min(f, 3))
+      if (f) {
+        albumScore = isRefresh ? Math.min(90, 50 + 20 * Math.min(f - 1, 2)) : Math.min(285, 95 * Math.min(f, 3))
+      }
     }
 
     let tokenScore = 0
     for (const tok of metaTokens(c.title, c.album)) {
       const f = tokenFreq.get(tok)
-      if (f) tokenScore += 32 * Math.min(f, 2)
+      if (f) tokenScore += (isRefresh ? 20 : 32) * Math.min(f, 2)
     }
-    tokenScore = Math.min(tokenScore, 128)
-    const tagScore = artistScore + albumScore + tokenScore
+    tokenScore = Math.min(tokenScore, isRefresh ? 64 : 128)
+    const tagScore = isRefresh ? Math.min(220, artistScore + albumScore + tokenScore) : artistScore + albumScore + tokenScore
 
     // Priority 2: Genre similarity & style clash penalty
     const cGenres = effectiveGenres(c, allTracks)
@@ -435,29 +478,77 @@ export function recommendForPlaylist(
               : 'clash'
     const genreScore = simTop * 90 + simAvg * 60 - clashTop * 80
 
-    // Priority 3: Other signals (co-occurrence, likes, plays, jitter)
+    // Priority 3: Other signals (co-occurrence, likes, plays, fatigue, jitter)
     const co = cooccurFreq.get(c.id) ?? 0
-    const coScore = co > 0 ? 28 * Math.min(co, 4) : 0
+    const coScore = co > 0 ? (isRefresh ? 22 : 28) * Math.min(co, 4) : 0
     const popScore = (c.liked ? 12 : 0) + Math.min(c.playCount * 3, 18)
-    const hash = (((hashId(c.id) * 2654435761) ^ ((seed + 1) * 1013904223)) >>> 0) / 4294967295
-    const jitter = seed === 0 ? (playlistTracks.length > 0 ? 20 : 45) : 95
-    const score = tagScore + genreScore + coScore + popScore + hash * jitter
+    const shown = options.shownCount?.get(c.id) ?? 0
+    const fatigue = isRefresh ? shown * 130 : 0
+    const jitter = isRefresh ? 180 : playlistTracks.length > 0 ? 20 : 45
+    const score = tagScore + genreScore + coScore + popScore - fatigue + seededRand(c.id, seed) * jitter
 
-    let tier = 0
+    let baseTier = 0
     if (playlistTracks.length > 0) {
-      if (artistScore > 0 || albumScore > 0) tier = 0
-      else if (tokenScore > 0 && rel !== 'clash') tier = 1
-      else if (rel === 'same') tier = 2
-      else if (rel === 'related' || (tokenScore > 0 && rel === 'clash')) tier = 3
-      else if (rel === 'unknown') tier = 4
-      else tier = 5
+      if (artistScore > 0 || albumScore > 0) baseTier = 0
+      else if (tokenScore > 0 && rel !== 'clash') baseTier = 1
+      else if (rel === 'same') baseTier = 2
+      else if (rel === 'related' || (tokenScore > 0 && rel === 'clash')) baseTier = 3
+      else if (rel === 'unknown') baseTier = 4
+      else baseTier = 5
     }
-    return { track: c, score, tier }
+
+    const last = options.lastShown?.get(c.id)
+    const age = last !== undefined ? Math.max(1, refreshStep - last) : Infinity
+    const coolBand = isRefresh && cooldown > 0 && age <= cooldown ? cooldown + 1 - age : 0
+
+    let effTier = baseTier
+    if (isRefresh) {
+      const relTier =
+        playlistTracks.length === 0
+          ? 0
+          : baseTier <= 2
+            ? 0
+            : baseTier === 3
+              ? 1
+              : baseTier === 4
+                ? 2
+                : 3
+      effTier = relTier + Math.min(shown, 2)
+    }
+
+    return { track: c, score, coolBand, effTier }
   })
 
-  // Strict priority order: file tags -> genre match -> other signals
-  scored.sort((a, b) => a.tier - b.tier || b.score - a.score)
-  return scored.slice(0, limit).map((x) => x.track)
+  scored.sort((a, b) => a.coolBand - b.coolBand || a.effTier - b.effTier || b.score - a.score)
+
+  const out: Track[] = []
+  const maxPerArtist = 2
+  for (let i = 0; i < scored.length; ) {
+    const cb = scored[i].coolBand
+    const et = scored[i].effTier
+    let j = i + 1
+    while (j < scored.length && scored[j].coolBand === cb && scored[j].effTier === et) j++
+    const counts = new Map<string, number>()
+    const waves: Track[][] = []
+    for (let k = i; k < j; k++) {
+      const t = scored[k].track
+      const primary = splitArtists(t.artist)[0] ?? ''
+      const artistKey = primary && primary !== 'Unknown Artist' ? norm(primary) : `\0${t.id}`
+      const c = counts.get(artistKey) ?? 0
+      counts.set(artistKey, c + 1)
+      const w = Math.floor(c / maxPerArtist)
+      if (!waves[w]) waves[w] = []
+      waves[w].push(t)
+    }
+    for (const wave of waves) {
+      for (const t of wave) {
+        out.push(t)
+        if (out.length >= limit) return out
+      }
+    }
+    i = j
+  }
+  return out
 }
 
 export function buildRadioMix(
@@ -811,33 +902,30 @@ export function attachShelfNav(
   let rafId = 0
   shelfEls[currentId] = node
   const update = () => onUpdate(currentId)
-  const onScroll = () => {
+  const scheduleUpdate = () => {
     if (rafId) return
     rafId = requestAnimationFrame(() => {
       rafId = 0
       update()
     })
   }
-  const ro = new ResizeObserver(update)
-  const mo = new MutationObserver(() => requestAnimationFrame(update))
-  node.addEventListener('scroll', onScroll, { passive: true })
+  const ro = new ResizeObserver(scheduleUpdate)
+  node.addEventListener('scroll', scheduleUpdate, { passive: true })
   ro.observe(node)
-  mo.observe(node, { childList: true })
-  requestAnimationFrame(update)
+  scheduleUpdate()
   return {
     update(newId: string) {
       if (newId !== currentId) {
         if (shelfEls[currentId] === node) delete shelfEls[currentId]
         currentId = newId
         shelfEls[currentId] = node
-        requestAnimationFrame(update)
+        scheduleUpdate()
       }
     },
     destroy() {
       if (rafId) cancelAnimationFrame(rafId)
-      node.removeEventListener('scroll', onScroll)
+      node.removeEventListener('scroll', scheduleUpdate)
       ro.disconnect()
-      mo.disconnect()
       if (shelfEls[currentId] === node) delete shelfEls[currentId]
     },
   }
@@ -879,7 +967,7 @@ function createSmoothAxisScroller(node: HTMLElement, axis: 'x' | 'y') {
   function step(now: number) {
     const actual = getPos()
     // If a massive external jump occurred (e.g. user clicked scrollbar track far away), sync immediately
-    if (Math.abs(actual - current) > 60) {
+    if (Math.abs(actual - current) > 160) {
       current = actual
       target = actual
       rafId = 0
@@ -915,7 +1003,7 @@ function createSmoothAxisScroller(node: HTMLElement, axis: 'x' | 'y') {
     if (max <= 0) return false
 
     const actual = getPos()
-    if (!rafId || Math.abs(actual - current) > 40) {
+    if (!rafId || Math.abs(actual - current) > 160) {
       current = actual
       target = actual
     }

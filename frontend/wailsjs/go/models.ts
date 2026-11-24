@@ -424,6 +424,7 @@ export namespace main {
 	}
 	export class Playlist {
 	    id: number;
+	    syncUuid: string;
 	    name: string;
 	    createdAt: number;
 	    lastPlayed: number;
@@ -438,6 +439,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
+	        this.syncUuid = source["syncUuid"];
 	        this.name = source["name"];
 	        this.createdAt = source["createdAt"];
 	        this.lastPlayed = source["lastPlayed"];
@@ -516,6 +518,204 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class SyncPeer {
+	    deviceId: string;
+	    deviceName: string;
+	    platform: string;
+	    ip: string;
+	    port: number;
+	    trackCount: number;
+	    playlistCount: number;
+	    pubKeySpkiB64: string;
+	    trusted: boolean;
+	    lastSeen: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SyncPeer(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.platform = source["platform"];
+	        this.ip = source["ip"];
+	        this.port = source["port"];
+	        this.trackCount = source["trackCount"];
+	        this.playlistCount = source["playlistCount"];
+	        this.pubKeySpkiB64 = source["pubKeySpkiB64"];
+	        this.trusted = source["trusted"];
+	        this.lastSeen = source["lastSeen"];
+	    }
+	}
+	export class SyncManualConnectResult {
+	    peer?: SyncPeer;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SyncManualConnectResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.peer = this.convertValues(source["peer"], SyncPeer);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class SyncPairPrompt {
+	    pairId: string;
+	    deviceId: string;
+	    deviceName: string;
+	    platform: string;
+	    trackCount: number;
+	    pin: string;
+	    trustedDefault: boolean;
+	    incoming: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SyncPairPrompt(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pairId = source["pairId"];
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.platform = source["platform"];
+	        this.trackCount = source["trackCount"];
+	        this.pin = source["pin"];
+	        this.trustedDefault = source["trustedDefault"];
+	        this.incoming = source["incoming"];
+	    }
+	}
+	
+	export class SyncSelfInfo {
+	    deviceId: string;
+	    deviceName: string;
+	    platform: string;
+	    port: number;
+	    localIps: string[];
+	    trackCount: number;
+	    playlistCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SyncSelfInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.platform = source["platform"];
+	        this.port = source["port"];
+	        this.localIps = source["localIps"];
+	        this.trackCount = source["trackCount"];
+	        this.playlistCount = source["playlistCount"];
+	    }
+	}
+	export class SyncStatus {
+	    state: string;
+	    phase: string;
+	    peerId: string;
+	    peerName: string;
+	    direction: string;
+	    pin: string;
+	    percent: number;
+	    currentFile: string;
+	    transferredBytes: number;
+	    totalBytes: number;
+	    filesDone: number;
+	    filesTotal: number;
+	    speedBps: number;
+	    addedTracks: number;
+	    updatedTracks: number;
+	    deletedTracks: number;
+	    syncedPlaylists: number;
+	    error: string;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SyncStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.phase = source["phase"];
+	        this.peerId = source["peerId"];
+	        this.peerName = source["peerName"];
+	        this.direction = source["direction"];
+	        this.pin = source["pin"];
+	        this.percent = source["percent"];
+	        this.currentFile = source["currentFile"];
+	        this.transferredBytes = source["transferredBytes"];
+	        this.totalBytes = source["totalBytes"];
+	        this.filesDone = source["filesDone"];
+	        this.filesTotal = source["filesTotal"];
+	        this.speedBps = source["speedBps"];
+	        this.addedTracks = source["addedTracks"];
+	        this.updatedTracks = source["updatedTracks"];
+	        this.deletedTracks = source["deletedTracks"];
+	        this.syncedPlaylists = source["syncedPlaylists"];
+	        this.error = source["error"];
+	        this.message = source["message"];
+	    }
+	}
+	export class SyncStateResponse {
+	    self: SyncSelfInfo;
+	    status: SyncStatus;
+	    peers: SyncPeer[];
+	    prompt?: SyncPairPrompt;
+	
+	    static createFrom(source: any = {}) {
+	        return new SyncStateResponse(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.self = this.convertValues(source["self"], SyncSelfInfo);
+	        this.status = this.convertValues(source["status"], SyncStatus);
+	        this.peers = this.convertValues(source["peers"], SyncPeer);
+	        this.prompt = this.convertValues(source["prompt"], SyncPairPrompt);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class Track {
 	    id: string;
 	    ytId: string;
@@ -556,6 +756,28 @@ export namespace main {
 	        this.lastPlayed = source["lastPlayed"];
 	        this.genres = source["genres"];
 	        this.genreSource = source["genreSource"];
+	    }
+	}
+	export class TrustedSyncPeer {
+	    deviceId: string;
+	    deviceName: string;
+	    platform: string;
+	    pubKeySpkiB64: string;
+	    pairedAt: number;
+	    lastSyncAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TrustedSyncPeer(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.deviceId = source["deviceId"];
+	        this.deviceName = source["deviceName"];
+	        this.platform = source["platform"];
+	        this.pubKeySpkiB64 = source["pubKeySpkiB64"];
+	        this.pairedAt = source["pairedAt"];
+	        this.lastSyncAt = source["lastSyncAt"];
 	    }
 	}
 	export class YtMusicCollection {

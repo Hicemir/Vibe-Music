@@ -599,7 +599,7 @@ class GenreDetector(
                     requestMethod = "GET"
                     connectTimeout = 10_000
                     readTimeout = 15_000
-                    setRequestProperty("User-Agent", "VibeMusic/0.6 (https://github.com/vibemusic)")
+                    setRequestProperty("User-Agent", "VibeMusic/0.7 (https://github.com/vibemusic)")
                     setRequestProperty("Accept", "application/json")
                 }
                 val code = conn.responseCode

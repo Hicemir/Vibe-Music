@@ -32,7 +32,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div class="card" class:round role="button" tabindex="0" {onclick} oncontextmenu={oncontext ?? onmore} onkeydown={(e) => e.key === 'Enter' && onclick()}>
   <div class="art">
-    <Cover {id} {ids} {icon} />
+    <Cover {id} {ids} {icon} size={480} />
     {#if onmore}
       <button
         class="card-more"

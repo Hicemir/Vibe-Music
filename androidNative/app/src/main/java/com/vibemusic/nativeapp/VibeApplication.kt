@@ -5,6 +5,7 @@ import com.vibemusic.nativeapp.data.VibeStore
 import com.vibemusic.nativeapp.genre.GenreDetector
 import com.vibemusic.nativeapp.player.PlayerManager
 import com.vibemusic.nativeapp.scanner.LibraryScanner
+import com.vibemusic.nativeapp.sync.SyncManager
 import com.vibemusic.nativeapp.ytdlp.YtdlpManager
 
 class VibeApplication : Application() {
@@ -24,6 +25,9 @@ class VibeApplication : Application() {
     lateinit var genreDetector: GenreDetector
         private set
 
+    lateinit var syncManager: SyncManager
+        private set
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -33,6 +37,7 @@ class VibeApplication : Application() {
         playerManager = PlayerManager(this, store)
         ytdlpManager = YtdlpManager(this, store, scanner)
         genreDetector = GenreDetector(store, scanner)
+        syncManager = SyncManager(this, store, scanner)
         genreDetector.refreshStatus()
 
         // Initialize yt-dlp in background

@@ -417,7 +417,7 @@ func (e *ContextEnricher) queryITunes(ctx context.Context, term, country string,
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "VibeMusic/0.6")
+	req.Header.Set("User-Agent", "VibeMusic/0.7")
 	req.Header.Set("Accept", "application/json")
 	resp, err := e.client.Do(req)
 	if err != nil {
@@ -543,7 +543,7 @@ func (e *ContextEnricher) queryWikipedia(ctx context.Context, query string, anch
 	if err != nil {
 		return ""
 	}
-	req.Header.Set("User-Agent", "VibeMusic/0.6 (https://github.com/vibemusic)")
+	req.Header.Set("User-Agent", "VibeMusic/0.7 (https://github.com/vibemusic)")
 	req.Header.Set("Accept", "application/json")
 	resp, err := e.client.Do(req)
 	if err != nil {

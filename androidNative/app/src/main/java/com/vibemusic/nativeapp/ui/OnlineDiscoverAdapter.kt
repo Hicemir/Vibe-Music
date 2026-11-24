@@ -33,8 +33,7 @@ class OnlineDiscoverAdapter(
 ) : RecyclerView.Adapter<OnlineDiscoverAdapter.ViewHolder>() {
 
     private val currentItems = mutableListOf<DiscoverItem>()
-    private val seenIds = mutableSetOf<String>()
-    private val seenTitleKeys = mutableSetOf<String>()
+    private val seenMatcher = CanonicalKey.SongMatcher()
     private val allColumns = mutableListOf<List<DiscoverItem>>()
     private var displayedColumns = 0
     private val bitmapCache = LruCache<String, Bitmap>(80)
@@ -42,8 +41,7 @@ class OnlineDiscoverAdapter(
 
     fun submitItems(items: List<DiscoverItem>) {
         currentItems.clear()
-        seenIds.clear()
-        seenTitleKeys.clear()
+        seenMatcher.clear()
         addUniqueItems(items)
         rebuildColumns()
         notifyDataSetChanged()
@@ -92,11 +90,8 @@ class OnlineDiscoverAdapter(
 
     private fun addUniqueItems(items: List<DiscoverItem>) {
         for (item in items) {
-            if (seenIds.contains(item.ytId)) continue
-            val titleKey = CanonicalKey.canonicalSongTitle(item.title, item.artist)
-            if (titleKey.isNotEmpty() && seenTitleKeys.contains(titleKey)) continue
-            seenIds.add(item.ytId)
-            if (titleKey.isNotEmpty()) seenTitleKeys.add(titleKey)
+            if (seenMatcher.matches(item.ytId, item.title, item.artist)) continue
+            seenMatcher.add(item.ytId, item.title, item.artist)
             currentItems.add(item)
         }
     }

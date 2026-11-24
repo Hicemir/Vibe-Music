@@ -2,8 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -15,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,9 +30,10 @@ import (
 )
 
 var (
-	fileVidIDRe    = regexp.MustCompile(`\[([A-Za-z0-9_-]{11})\][^/\\]*$`)
-	archiveSkipRe  = regexp.MustCompile(`\[download\]\s+([A-Za-z0-9_-]{11}):\s+has already been recorded in the archive`)
-	alreadyDlRe    = regexp.MustCompile(`\[download\]\s+(.+?)\s+has already been downloaded`)
+	fileVidIDRe      = regexp.MustCompile(`\[([A-Za-z0-9_-]{11})\][^/\\]*$`)
+	archiveSkipRe    = regexp.MustCompile(`\[download\]\s+([A-Za-z0-9_-]{11}):\s+has already been recorded in the archive`)
+	alreadyDlRe      = regexp.MustCompile(`\[download\]\s+(.+?)\s+has already been downloaded`)
+	ytSearchPrefixRe = regexp.MustCompile(`(?i)^ytsearch\d*:`)
 )
 
 func extractURLVideoID(raw string) string {
@@ -388,14 +392,23 @@ func areSameSongTokens(a, b []string) bool {
 	if len(b) < len(a) {
 		small, large = b, a
 	}
-	largeSet := make(map[string]bool, len(large))
-	for _, tok := range large {
-		largeSet[tok] = true
+	var largeSet map[string]bool
+	if len(large) > 10 {
+		largeSet = make(map[string]bool, len(large))
+		for _, tok := range large {
+			largeSet[tok] = true
+		}
 	}
 	distinctive := false
 	matched := 0
 	for _, tok := range small {
-		if !largeSet[tok] {
+		var has bool
+		if largeSet != nil {
+			has = largeSet[tok]
+		} else {
+			has = slices.Contains(large, tok)
+		}
+		if !has {
 			return false
 		}
 		matched++
@@ -590,7 +603,7 @@ func (y *Ytdlp) EnsureUpToDate() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, own, "-U")
-		setCmdHidden(cmd)
+		configureManagedCmd(cmd)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			p := y.Path()
@@ -690,24 +703,51 @@ type DownloadJob struct {
 }
 
 type Downloader struct {
-	app       *App
-	mu        sync.Mutex
-	jobs      []*DownloadJob
-	nextID    int64
-	notify    chan struct{}
-	recMu     sync.Mutex
-	seenRec   []string
-	usedSeeds map[string]bool
+	app              *App
+	mu               sync.Mutex
+	jobs             []*DownloadJob
+	nextID           int64
+	notify           chan struct{}
+	recMu            sync.Mutex
+	seenRec          []string
+	usedSeeds        map[string]bool
+	httpClient       *http.Client
+	discMu           sync.Mutex
+	discCancel       context.CancelFunc
+	discGen          uint64
+	artistDiscMu     sync.Mutex
+	artistDiscCancel context.CancelFunc
+	artistDiscGen    uint64
 }
 
 func NewDownloader(app *App) *Downloader {
 	d := &Downloader{
-		app:       app,
-		notify:    make(chan struct{}, 1),
-		usedSeeds: map[string]bool{},
+		app:        app,
+		notify:     make(chan struct{}, 1),
+		usedSeeds:  map[string]bool{},
+		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	go d.worker()
 	return d
+}
+
+// CancelDiscovery cancels any in-flight home or artist online discovery requests.
+func (d *Downloader) CancelDiscovery() {
+	d.discMu.Lock()
+	if d.discCancel != nil {
+		d.discCancel()
+		d.discCancel = nil
+		d.discGen++
+	}
+	d.discMu.Unlock()
+
+	d.artistDiscMu.Lock()
+	if d.artistDiscCancel != nil {
+		d.artistDiscCancel()
+		d.artistDiscCancel = nil
+		d.artistDiscGen++
+	}
+	d.artistDiscMu.Unlock()
 }
 
 func (d *Downloader) signal() {
@@ -1167,7 +1207,7 @@ func (d *Downloader) run(ctx context.Context, j *DownloadJob) {
 		j.URL)
 
 	cmd := exec.CommandContext(ctx, path, args...)
-	setCmdHidden(cmd)
+	configureManagedCmd(cmd)
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {
@@ -1446,7 +1486,7 @@ func isNonMusicEntry(title, channel string, duration float64) bool {
 	return false
 }
 
-func (d *Downloader) buildDiscoveryMatcher(extraKnown ...string) *songSet {
+func (d *Downloader) buildDiscoveryMatcherWithHistory(includeHistory bool, extraKnown ...string) *songSet {
 	d.app.trMu.RLock()
 	tracks := make([]Track, 0, len(d.app.tracks))
 	for _, t := range d.app.tracks {
@@ -1478,19 +1518,29 @@ func (d *Downloader) buildDiscoveryMatcher(extraKnown ...string) *songSet {
 	}
 	d.mu.Unlock()
 
-	if d.app.store != nil {
-		for _, k := range d.app.store.LoadRecommendedHistory() {
-			matcher.addRawHistoryKey(k)
+	if includeHistory {
+		if d.app.store != nil {
+			for _, k := range d.app.store.LoadRecommendedHistory() {
+				matcher.addRawHistoryKey(k)
+			}
+		} else {
+			d.recMu.Lock()
+			for _, k := range d.seenRec {
+				matcher.addRawHistoryKey(k)
+			}
+			d.recMu.Unlock()
 		}
-	} else {
-		d.recMu.Lock()
-		for _, k := range d.seenRec {
-			matcher.addRawHistoryKey(k)
-		}
-		d.recMu.Unlock()
 	}
 
 	return matcher
+}
+
+func (d *Downloader) buildDiscoveryMatcher(extraKnown ...string) *songSet {
+	return d.buildDiscoveryMatcherWithHistory(true, extraKnown...)
+}
+
+func (d *Downloader) buildOwnedDiscoveryMatcher(extraKnown ...string) *songSet {
+	return d.buildDiscoveryMatcherWithHistory(false, extraKnown...)
 }
 
 func (d *Downloader) recordRecommended(items []DiscoverItem, knownNames map[string]bool) {
@@ -1576,35 +1626,930 @@ func filterFlatPlaylistEntries(pl ytFlatPlaylist, matcher *songSet, shuffle bool
 	return items
 }
 
-func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
-	path := d.app.ytdlp.Path()
-	if path == "" {
+func parseDurationText(raw string) float64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0
+	}
+	total := 0
+	for i, part := range parts {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || n < 0 {
+			return 0
+		}
+		if i > 0 && n >= 60 {
+			return 0
+		}
+		total = total*60 + n
+	}
+	return float64(total)
+}
+
+func extractInnerTubeThumbnails(renderer map[string]any) []ytFlatThumb {
+	var thumbs []ytFlatThumb
+	for _, tr := range asSlice(getPath(renderer, "thumbnail", "thumbnails")) {
+		tm := asMap(tr)
+		if tm == nil {
+			continue
+		}
+		u := getStr(tm, "url")
+		if u == "" {
+			continue
+		}
+		if strings.HasPrefix(u, "//") {
+			u = "https:" + u
+		}
+		w, _ := tm["width"].(float64)
+		h, _ := tm["height"].(float64)
+		thumbs = append(thumbs, ytFlatThumb{URL: u, Width: int(w), Height: int(h)})
+	}
+	return thumbs
+}
+
+func firstNonEmptyRunsText(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s := strings.TrimSpace(extractRunsText(asMap(m[k]))); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func cleanInnerTubeArtist(raw string) string {
+	s := strings.TrimSpace(raw)
+	for _, sep := range []string{" • ", " · "} {
+		if idx := strings.Index(s, sep); idx >= 0 {
+			s = strings.TrimSpace(s[:idx])
+		}
+	}
+	return s
+}
+
+func extractInnerTubeRendererEntry(renderer map[string]any, channelKeys ...string) (ytFlatEntry, bool) {
+	if renderer == nil || renderer["unplayableText"] != nil {
+		return ytFlatEntry{}, false
+	}
+	vid := getStr(renderer, "videoId")
+	if len(vid) != 11 {
+		return ytFlatEntry{}, false
+	}
+	title := strings.TrimSpace(extractRunsText(asMap(renderer["title"])))
+	if title == "" {
+		return ytFlatEntry{}, false
+	}
+	channel := cleanInnerTubeArtist(firstNonEmptyRunsText(renderer, channelKeys...))
+	dur := parseDurationText(extractRunsText(asMap(renderer["lengthText"])))
+	return ytFlatEntry{
+		ID:         vid,
+		Title:      title,
+		Channel:    channel,
+		Duration:   dur,
+		Thumbnails: extractInnerTubeThumbnails(renderer),
+	}, true
+}
+
+func parseInnerTubeNextEntries(root map[string]any, limit int) []ytFlatEntry {
+	if root == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 40
+	}
+	var entries []ytFlatEntry
+	seen := map[string]bool{}
+	var walk func(node any)
+	walk = func(node any) {
+		if len(entries) >= limit {
+			return
+		}
+		switch v := node.(type) {
+		case map[string]any:
+			if vr := asMap(v["playlistPanelVideoRenderer"]); vr != nil {
+				if e, ok := extractInnerTubeRendererEntry(vr, "shortBylineText", "longBylineText"); ok && !seen[e.ID] {
+					seen[e.ID] = true
+					entries = append(entries, e)
+				}
+				return
+			}
+			if wr := asMap(v["playlistPanelVideoWrapperRenderer"]); wr != nil {
+				if pr := asMap(wr["primaryRenderer"]); pr != nil {
+					walk(pr)
+					return
+				}
+			}
+			for _, child := range v {
+				walk(child)
+				if len(entries) >= limit {
+					return
+				}
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+				if len(entries) >= limit {
+					return
+				}
+			}
+		}
+	}
+	walk(root)
+	return entries
+}
+
+func innerTubeNextContainsSeed(root map[string]any, entries []ytFlatEntry, seedVideoID string) bool {
+	if len(entries) < 2 || seedVideoID == "" {
+		return false
+	}
+	for _, e := range entries {
+		if e.ID == seedVideoID {
+			return true
+		}
+	}
+	if root == nil {
+		return false
+	}
+	found := false
+	var walk func(node any)
+	walk = func(node any) {
+		if found {
+			return
+		}
+		switch v := node.(type) {
+		case map[string]any:
+			if ppr := asMap(v["playlistPanelRenderer"]); ppr != nil {
+				if pid := getStr(ppr, "playlistId"); pid != "" && strings.Contains(pid, seedVideoID) {
+					found = true
+					return
+				}
+			}
+			if wr := asMap(v["playlistPanelVideoWrapperRenderer"]); wr != nil {
+				for _, cp := range asSlice(wr["counterpart"]) {
+					cm := asMap(cp)
+					if cr := asMap(cm["counterpartRenderer"]); cr != nil {
+						if vr := asMap(cr["playlistPanelVideoRenderer"]); vr != nil && getStr(vr, "videoId") == seedVideoID {
+							found = true
+							return
+						}
+					}
+				}
+			}
+			for _, child := range v {
+				walk(child)
+				if found {
+					return
+				}
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+				if found {
+					return
+				}
+			}
+		}
+	}
+	walk(root)
+	return found
+}
+
+func parseInnerTubeSearchEntries(root map[string]any, limit int) []ytFlatEntry {
+	if root == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 40
+	}
+	var entries []ytFlatEntry
+	seen := map[string]bool{}
+	var walk func(node any)
+	walk = func(node any) {
+		if len(entries) >= limit {
+			return
+		}
+		switch v := node.(type) {
+		case map[string]any:
+			if vr := asMap(v["videoRenderer"]); vr != nil {
+				if vr["unplayableText"] != nil {
+					return
+				}
+				vid := getStr(vr, "videoId")
+				if len(vid) != 11 || seen[vid] {
+					return
+				}
+				title := strings.TrimSpace(extractRunsText(asMap(vr["title"])))
+				if title == "" {
+					return
+				}
+				channel := cleanInnerTubeArtist(firstNonEmptyRunsText(vr, "ownerText", "longBylineText", "shortBylineText"))
+				dur := parseDurationText(extractRunsText(asMap(vr["lengthText"])))
+				seen[vid] = true
+				entries = append(entries, ytFlatEntry{
+					ID:         vid,
+					Title:      title,
+					Channel:    channel,
+					Duration:   dur,
+					Thumbnails: extractInnerTubeThumbnails(vr),
+				})
+				return
+			}
+			for _, child := range v {
+				walk(child)
+				if len(entries) >= limit {
+					return
+				}
+			}
+		case []any:
+			for _, child := range v {
+				walk(child)
+				if len(entries) >= limit {
+					return
+				}
+			}
+		}
+	}
+	walk(root)
+	return entries
+}
+
+func postInnerTubeJSON(ctx context.Context, client *http.Client, endpoint string, payload map[string]any, origin, clientID, clientVer string) (map[string]any, error) {
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("X-Origin", origin)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("X-Youtube-Client-Name", clientID)
+	req.Header.Set("X-Youtube-Client-Version", clientVer)
+	if cookieHeader := readSavedCookieHeader(); cookieHeader != "" {
+		req.Header.Set("Cookie", cookieHeader)
+		if auth := (&App{}).BuildSapisidHashHeader(origin); auth != "" {
+			req.Header.Set("Authorization", auth)
+			req.Header.Set("X-Goog-AuthUser", "0")
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("youtube innertube HTTP %d", resp.StatusCode)
+	}
+	var root map[string]any
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&root); err != nil {
+		return nil, err
+	}
+	return root, nil
+}
+
+func postYouTubeInnerTube(ctx context.Context, client *http.Client, endpoint string, payload map[string]any) (map[string]any, error) {
+	return postInnerTubeJSON(ctx, client, endpoint, payload, "https://www.youtube.com", "1", "2.20251001.01.00")
+}
+
+func postYouTubeMusicInnerTube(ctx context.Context, client *http.Client, endpoint string, payload map[string]any) (map[string]any, error) {
+	return postInnerTubeJSON(ctx, client, endpoint, payload, "https://music.youtube.com", "67", "1.20241118.01.00")
+}
+
+type ytRadioSource int
+
+const (
+	ytRadioSourceYTM ytRadioSource = iota + 1
+	ytRadioSourceYT
+	ytRadioSourceSearch
+)
+
+func countNonSeedEntries(entries []ytFlatEntry, seedVideoID string) int {
+	n := 0
+	for _, e := range entries {
+		if e.ID != "" && e.ID != seedVideoID {
+			n++
+		}
+	}
+	return n
+}
+
+func fetchYouTubeRadioWithSource(ctx context.Context, client *http.Client, videoID string) ([]ytFlatEntry, ytRadioSource, error) {
+	videoID = strings.TrimSpace(videoID)
+	if len(videoID) != 11 {
+		return nil, 0, fmt.Errorf("invalid video id")
+	}
+
+	ytmPayload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB_REMIX",
+				"clientVersion": "1.20241118.01.00",
+				"hl":            "en",
+			},
+		},
+		"videoId":                       videoID,
+		"playlistId":                    "RDAMVM" + videoID,
+		"isAudioOnly":                   true,
+		"enablePersistentPlaylistPanel": true,
+		"tunerSettingValue":             "AUTOMIX_SETTING_NORMAL",
+	}
+	var lastErr error
+	if root, err := postYouTubeMusicInnerTube(ctx, client, "https://music.youtube.com/youtubei/v1/next?prettyPrint=false", ytmPayload); err == nil {
+		entries := parseInnerTubeNextEntries(root, 25)
+		if innerTubeNextContainsSeed(root, entries, videoID) && countNonSeedEntries(entries, videoID) >= 3 {
+			return entries, ytRadioSourceYTM, nil
+		}
+	} else {
+		lastErr = err
+	}
+
+	payload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB",
+				"clientVersion": "2.20251001.01.00",
+				"hl":            "en",
+			},
+		},
+		"videoId":    videoID,
+		"playlistId": "RD" + videoID,
+	}
+	if root, err := postYouTubeInnerTube(ctx, client, "https://www.youtube.com/youtubei/v1/next?prettyPrint=false", payload); err == nil {
+		entries := parseInnerTubeNextEntries(root, 20)
+		if innerTubeNextContainsSeed(root, entries, videoID) && countNonSeedEntries(entries, videoID) >= 3 {
+			return entries, ytRadioSourceYT, nil
+		}
+		return nil, 0, nil
+	} else if lastErr == nil {
+		lastErr = err
+	}
+	return nil, 0, lastErr
+}
+
+func fetchYouTubeRadioInnerTube(ctx context.Context, client *http.Client, videoID string) ([]ytFlatEntry, error) {
+	entries, _, err := fetchYouTubeRadioWithSource(ctx, client, videoID)
+	return entries, err
+}
+
+func fetchYouTubeSearchInnerTube(ctx context.Context, client *http.Client, query string, limit int) ([]ytFlatEntry, error) {
+	query = strings.TrimSpace(ytSearchPrefixRe.ReplaceAllString(strings.TrimSpace(query), ""))
+	if query == "" {
+		return nil, fmt.Errorf("empty search query")
+	}
+	payload := map[string]any{
+		"context": map[string]any{
+			"client": map[string]any{
+				"clientName":    "WEB",
+				"clientVersion": "2.20251001.01.00",
+				"hl":            "en",
+				"gl":            "US",
+			},
+		},
+		"query": query,
+	}
+	root, err := postYouTubeInnerTube(ctx, client, "https://www.youtube.com/youtubei/v1/search?prettyPrint=false", payload)
+	if err != nil {
+		return nil, err
+	}
+	return parseInnerTubeSearchEntries(root, limit), nil
+}
+
+type discoverySeedInfo struct {
+	vid         string
+	artist      string
+	artists     []string
+	artistSet   map[string]bool
+	artistWords []string
+	tokens      []string
+	score       float64
+}
+
+type discoveryLibraryProfile struct {
+	artists     map[string]bool
+	genreWeight map[string]float64
+	genreTotal  float64
+	artistGenre func(artistKey string) []string
+}
+
+type radioFetchOutcome struct {
+	seed          discoverySeedInfo
+	source        ytRadioSource
+	entries       []ytFlatEntry
+	coherent      bool
+	seedArtistHits int
+	libArtistHits int
+	tokenHits     int
+	anchorHits    int
+}
+
+func isGenericDiscoveryArtist(normArt string) bool {
+	switch normArt {
+	case "", "unknown", "unknown artist", "various artists", "youtube", "release", "auto generated by youtube", "auto-generated by youtube":
+		return true
+	}
+	return false
+}
+
+func normFoldWords(s string) string {
+	s = norm.NFKD.String(strings.ToLower(s))
+	var b strings.Builder
+	b.Grow(len(s))
+	lastSpace := true
+	for _, r := range s {
+		if unicode.Is(unicode.Mn, r) {
+			continue
+		}
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == '%':
+			b.WriteRune(r)
+			lastSpace = false
+		case r == '\'' || r == '’' || r == '‘':
+		default:
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func normDiscoveryArtists(raw string) []string {
+	cleaned := strings.TrimSpace(topicSuffixRe.ReplaceAllString(cleanInnerTubeArtist(raw), ""))
+	if cleaned == "" {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	add := func(cand string) {
+		k := normName(cand)
+		if isGenericDiscoveryArtist(k) || seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, k)
+	}
+	for _, a := range splitArtistsGo(cleaned) {
+		add(a)
+	}
+	if len(out) == 0 {
+		add(cleaned)
+	}
+	return out
+}
+
+func extractDistinctiveTokens(title, album string, artistNorms []string) []string {
+	artistToks := map[string]bool{}
+	for _, an := range artistNorms {
+		for _, w := range strings.Fields(normFoldWords(an)) {
+			artistToks[w] = true
+		}
+	}
+	cleaned := strings.TrimSpace(stripTitleDecorations(title) + " " + stripTitleDecorations(album))
+	words := strings.Fields(normFoldWords(cleaned))
+	var out []string
+	seen := map[string]bool{}
+	for _, w := range words {
+		if seen[w] || songStopWords[w] || songGenericWords[w] || artistToks[w] {
+			continue
+		}
+		hasNonASCII := false
+		for _, r := range w {
+			if r > unicode.MaxASCII {
+				hasNonASCII = true
+				break
+			}
+		}
+		if utf8.RuneCountInString(w) >= 4 || (hasNonASCII && utf8.RuneCountInString(w) >= 2) {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+func entryMatchSignals(seed discoverySeedInfo, title, rawChannel string, lib discoveryLibraryProfile) (matchesSeedArtist, matchesLibArtist, matchesSeedToken bool, entryArtists []string) {
+	entryArtists = normDiscoveryArtists(rawChannel)
+	for _, ea := range entryArtists {
+		if seed.artistSet[ea] {
+			matchesSeedArtist = true
+		} else if lib.artists[ea] {
+			matchesLibArtist = true
+		}
+	}
+	titleFold := normFoldWords(title)
+	if !matchesSeedArtist && titleFold != "" && len(seed.artistWords) > 0 {
+		padded := " " + titleFold + " "
+		for _, saw := range seed.artistWords {
+			if utf8.RuneCountInString(saw) >= 3 && strings.Contains(padded, " "+saw+" ") {
+				matchesSeedArtist = true
+				break
+			}
+		}
+	}
+	if !matchesSeedToken && len(seed.tokens) > 0 {
+		haystack := " " + titleFold + " " + normFoldWords(rawChannel) + " "
+		for _, tok := range seed.tokens {
+			if strings.Contains(haystack, " "+tok+" ") {
+				matchesSeedToken = true
+				break
+			}
+		}
+	}
+	return
+}
+
+func evaluateRadioMixCoherence(seed discoverySeedInfo, entries []ytFlatEntry, source ytRadioSource, lib discoveryLibraryProfile) (coherent bool, seedArtistHits, libArtistHits, tokenHits, anchorHits int) {
+	if source == ytRadioSourceSearch {
+		return len(entries) > 0, 0, 0, 0, 0
+	}
+	inspected := 0
+	for _, e := range entries {
+		if e.ID == "" || e.ID == seed.vid {
+			continue
+		}
+		title := strings.TrimSpace(e.Title)
+		if title == "" || title == "[Deleted video]" || title == "[Private video]" {
+			continue
+		}
+		rawChannel := strings.TrimSpace(e.Channel)
+		if rawChannel == "" {
+			rawChannel = strings.TrimSpace(e.Uploader)
+		}
+		if isNonMusicEntry(title, rawChannel, e.Duration) {
+			continue
+		}
+		msa, mla, mst, _ := entryMatchSignals(seed, title, rawChannel, lib)
+		if msa {
+			seedArtistHits++
+		}
+		if mla {
+			libArtistHits++
+		}
+		if mst {
+			tokenHits++
+		}
+		if msa || mla || mst {
+			anchorHits++
+		}
+		inspected++
+		if inspected >= 14 {
+			break
+		}
+	}
+	switch source {
+	case ytRadioSourceYTM:
+		coherent = anchorHits >= 1
+	case ytRadioSourceYT:
+		coherent = seedArtistHits >= 1 || libArtistHits >= 2 || (libArtistHits >= 1 && tokenHits >= 1)
+	}
+	return
+}
+
+func discoverySourceMaxPos(source ytRadioSource) int {
+	switch source {
+	case ytRadioSourceYTM:
+		return 16
+	case ytRadioSourceYT:
+		return 12
+	case ytRadioSourceSearch:
+		return 20
+	default:
+		return 12
+	}
+}
+
+func rankDiscoveryOutcomes(
+	outcomes []radioFetchOutcome,
+	matcher *songSet,
+	lib discoveryLibraryProfile,
+	rngSeed int64,
+	target int,
+	artistCount map[string]int,
+) []DiscoverItem {
+	if target <= 0 || len(outcomes) == 0 {
 		return []DiscoverItem{}
 	}
+	if artistCount == nil {
+		artistCount = map[string]int{}
+	}
+
+	trackSeedCount := map[string]int{}
+	artistSeedCount := map[string]int{}
+	for _, o := range outcomes {
+		if !o.coherent {
+			continue
+		}
+		maxPos := discoverySourceMaxPos(o.source)
+		seenVidInSeed := map[string]bool{}
+		seenArtInSeed := map[string]bool{}
+		pos := 0
+		for _, e := range o.entries {
+			if e.ID == "" || e.ID == o.seed.vid || len(e.ID) != 11 {
+				continue
+			}
+			if pos >= maxPos {
+				break
+			}
+			pos++
+			if !seenVidInSeed[e.ID] {
+				seenVidInSeed[e.ID] = true
+				trackSeedCount[e.ID]++
+			}
+			rawChannel := strings.TrimSpace(e.Channel)
+			if rawChannel == "" {
+				rawChannel = strings.TrimSpace(e.Uploader)
+			}
+			for _, ea := range normDiscoveryArtists(rawChannel) {
+				if !seenArtInSeed[ea] {
+					seenArtInSeed[ea] = true
+					artistSeedCount[ea]++
+				}
+			}
+		}
+	}
+
+	type scoredCandidate struct {
+		item  DiscoverItem
+		score float64
+	}
+	type rankedBucket struct {
+		sourceRank int
+		orderTie   float64
+		items      []scoredCandidate
+	}
+
+	localRng := rand.New(rand.NewSource(rngSeed))
+	var buckets []rankedBucket
+	for _, o := range outcomes {
+		if !o.coherent {
+			continue
+		}
+		maxPos := discoverySourceMaxPos(o.source)
+		var cands []scoredCandidate
+		pos := 0
+		for _, e := range o.entries {
+			if len(e.ID) != 11 || e.ID == o.seed.vid {
+				continue
+			}
+			if pos >= maxPos {
+				break
+			}
+			curPos := pos
+			pos++
+
+			title := strings.TrimSpace(e.Title)
+			if title == "" || title == "[Deleted video]" || title == "[Private video]" {
+				continue
+			}
+			rawChannel := strings.TrimSpace(e.Channel)
+			if rawChannel == "" {
+				rawChannel = strings.TrimSpace(e.Uploader)
+			}
+			if isNonMusicEntry(title, rawChannel, e.Duration) {
+				continue
+			}
+			artist := strings.TrimSpace(topicSuffixRe.ReplaceAllString(cleanInnerTubeArtist(rawChannel), ""))
+			if matcher.matches(e.ID, title, artist) {
+				continue
+			}
+
+			msa, mla, mst, entryArtists := entryMatchSignals(o.seed, title, rawChannel, lib)
+			primaryArt := ""
+			if len(entryArtists) > 0 {
+				primaryArt = entryArtists[0]
+			}
+			crossSeed := trackSeedCount[e.ID]
+			if primaryArt != "" && artistSeedCount[primaryArt] > crossSeed {
+				crossSeed = artistSeedCount[primaryArt]
+			}
+			corroborated := msa || mla || mst || crossSeed >= 2
+
+			// Anti-drift gate: block uncorroborated tail/generic entries
+			switch o.source {
+			case ytRadioSourceSearch:
+				if !msa && !mla {
+					continue
+				}
+			case ytRadioSourceYT:
+				if !corroborated && !(o.seedArtistHits >= 2 && curPos < 4) {
+					continue
+				}
+			case ytRadioSourceYTM:
+				if !corroborated && curPos >= 8 {
+					continue
+				}
+			}
+
+			// Zero-network genre clash guard using cached artist_genres and title/artist heuristics
+			genreBonus := 0.0
+			if lib.genreTotal > 0 && !msa && !mla {
+				var candGenres []string
+				if lib.artistGenre != nil && primaryArt != "" {
+					candGenres = append(candGenres, lib.artistGenre(primaryArt)...)
+				}
+				candGenres = append(candGenres, heuristicGenres(Track{Title: title, Artist: artist})...)
+				candGenres = dedupeGenres(candGenres, 5)
+				if len(candGenres) > 0 {
+					simW := 0.0
+					clashW := 0.0
+					for lg, lw := range lib.genreWeight {
+						simW += lw * genreSimGo(candGenres, []string{lg})
+						clashW += lw * genreClashGo(candGenres, []string{lg})
+					}
+					sim := math.Min(1.0, simW/lib.genreTotal)
+					clash := math.Min(1.0, clashW/lib.genreTotal)
+					if clash >= 0.55 && sim < 0.25 {
+						continue
+					}
+					genreBonus = sim*18.0 - clash*20.0
+				}
+			}
+
+			var base float64
+			switch o.source {
+			case ytRadioSourceYTM:
+				base = 36.0 - float64(curPos)*2.4
+			case ytRadioSourceYT:
+				base = 18.0 - float64(curPos)*3.5
+			default:
+				base = 24.0 - float64(curPos)*1.0
+			}
+			cohBonus := math.Min(float64(o.anchorHits), 6.0) * 4.0
+			anchorBonus := 0.0
+			if msa {
+				anchorBonus += 18.0
+			}
+			if mla {
+				anchorBonus += 16.0
+			}
+			if mst {
+				anchorBonus += 14.0
+			}
+			crossBonus := 0.0
+			if crossSeed >= 2 {
+				crossBonus = math.Min(float64(crossSeed-1)*24.0, 48.0)
+			}
+
+			sc := base + cohBonus + anchorBonus + crossBonus + genreBonus + localRng.Float64()*14.0
+			cands = append(cands, scoredCandidate{
+				item: DiscoverItem{
+					VideoID:  e.ID,
+					Title:    title,
+					Artist:   artist,
+					Duration: e.Duration,
+					ThumbURL: bestDiscoverThumbURL(e.ID, e.Thumbnails),
+					URL:      fmt.Sprintf("https://www.youtube.com/watch?v=%s", e.ID),
+				},
+				score: sc,
+			})
+		}
+		if len(cands) == 0 {
+			continue
+		}
+		sort.SliceStable(cands, func(i, j int) bool { return cands[i].score > cands[j].score })
+		buckets = append(buckets, rankedBucket{
+			sourceRank: int(o.source),
+			orderTie:   localRng.Float64(),
+			items:      cands,
+		})
+	}
+	if len(buckets) == 0 {
+		return []DiscoverItem{}
+	}
+	sort.SliceStable(buckets, func(i, j int) bool {
+		if buckets[i].sourceRank != buckets[j].sourceRank {
+			return buckets[i].sourceRank < buckets[j].sourceRank
+		}
+		return buckets[i].orderTie < buckets[j].orderTie
+	})
+
+	maxLen := 0
+	for _, b := range buckets {
+		if len(b.items) > maxLen {
+			maxLen = len(b.items)
+		}
+	}
+
+	out := make([]DiscoverItem, 0, target)
+	for round := 0; round < maxLen && len(out) < target; round++ {
+		for bi := 0; bi < len(buckets) && len(out) < target; bi++ {
+			if round >= len(buckets[bi].items) {
+				continue
+			}
+			it := buckets[bi].items[round].item
+			if matcher.matches(it.VideoID, it.Title, it.Artist) {
+				continue
+			}
+			aKey := normSongText(it.Artist)
+			if aKey != "" && artistCount[aKey] >= 2 {
+				continue
+			}
+			matcher.add(it.VideoID, it.Title, it.Artist)
+			if aKey != "" {
+				artistCount[aKey]++
+			}
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
+	discCtx, discCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	d.discMu.Lock()
+	if d.discCancel != nil {
+		d.discCancel()
+	}
+	d.discGen++
+	myGen := d.discGen
+	d.discCancel = discCancel
+	d.discMu.Unlock()
+	defer func() {
+		discCancel()
+		d.discMu.Lock()
+		if d.discGen == myGen {
+			d.discCancel = nil
+		}
+		d.discMu.Unlock()
+	}()
 
 	matcher := d.buildDiscoveryMatcher()
 
-	type seedCandidate struct {
-		vid   string
-		score float64
-	}
-	byArtist := map[string][]seedCandidate{}
+	byArtist := map[string][]discoverySeedInfo{}
 	artistAff := map[string]float64{}
+	libArtists := map[string]bool{}
+	genreWeight := map[string]float64{}
+	genreTotal := 0.0
 	totalVids := 0
+
 	d.app.trMu.RLock()
 	for _, t := range d.app.tracks {
+		artists := splitArtistsGo(t.Artist)
+		var normArts []string
+		var wordArts []string
+		artSet := map[string]bool{}
+		primaryDisplay := ""
+		primaryKey := "unknown"
+		for _, a := range artists {
+			nk := normName(a)
+			if isGenericDiscoveryArtist(nk) {
+				continue
+			}
+			if primaryDisplay == "" {
+				primaryDisplay = strings.TrimSpace(topicSuffixRe.ReplaceAllString(a, ""))
+				primaryKey = nk
+			}
+			if !artSet[nk] {
+				artSet[nk] = true
+				normArts = append(normArts, nk)
+				libArtists[nk] = true
+				if fw := normFoldWords(a); fw != "" {
+					wordArts = append(wordArts, fw)
+				}
+			}
+		}
+
+		tScore := float64(t.PlayCount*10) + 1
+		if t.Liked {
+			tScore += 25
+		}
+		if gs := splitGenres(t.Genre); len(gs) > 0 {
+			gw := 1.0 + float64(t.PlayCount)*0.5 + func() float64 {
+				if t.Liked {
+					return 2.0
+				}
+				return 0.0
+			}()
+			for _, g := range gs {
+				genreWeight[g] += gw
+				genreTotal += gw
+			}
+		}
+
 		if vid := trackVideoID(t); vid != "" {
-			artists := splitArtistsGo(t.Artist)
-			primary := "unknown"
-			if len(artists) > 0 {
-				primary = strings.ToLower(strings.TrimSpace(artists[0]))
-			}
-			tScore := float64(t.PlayCount*10) + 1
-			if t.Liked {
-				tScore += 25
-			}
-			byArtist[primary] = append(byArtist[primary], seedCandidate{vid: vid, score: tScore})
-			artistAff[primary] += tScore
+			byArtist[primaryKey] = append(byArtist[primaryKey], discoverySeedInfo{
+				vid:         vid,
+				artist:      primaryDisplay,
+				artists:     normArts,
+				artistSet:   artSet,
+				artistWords: wordArts,
+				tokens:      extractDistinctiveTokens(t.Title, t.Album, normArts),
+				score:       tScore,
+			})
+			artistAff[primaryKey] += tScore
 			totalVids++
 		}
 	}
@@ -1614,10 +2559,22 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 		return []DiscoverItem{}
 	}
 
+	// Skip "unknown" / generic artist bucket when real artists exist
+	hasNamedArtists := false
+	for k := range byArtist {
+		if !isGenericDiscoveryArtist(k) {
+			hasNamedArtists = true
+			break
+		}
+	}
+
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(seed)*99991))
 	artistKeys := make([]string, 0, len(byArtist))
 	artistRank := make(map[string]float64, len(byArtist))
 	for k := range byArtist {
+		if hasNamedArtists && isGenericDiscoveryArtist(k) {
+			continue
+		}
 		list := byArtist[k]
 		// Prioritize listened/liked tracks within each artist with light random exploration
 		for i := range list {
@@ -1632,8 +2589,8 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 		return artistRank[artistKeys[i]] > artistRank[artistKeys[j]]
 	})
 
-	const targetSeeds = 6
-	var chosen []string
+	const targetSeeds = 8
+	var chosen []discoverySeedInfo
 	seenSeed := map[string]bool{}
 
 	d.recMu.Lock()
@@ -1641,8 +2598,8 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 		d.usedSeeds = map[string]bool{}
 	}
 	hasUnused := false
-	for _, list := range byArtist {
-		for _, c := range list {
+	for _, ak := range artistKeys {
+		for _, c := range byArtist[ak] {
 			if !d.usedSeeds[c.vid] {
 				hasUnused = true
 				break
@@ -1661,7 +2618,7 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 		for _, c := range byArtist[ak] {
 			if !d.usedSeeds[c.vid] && !seenSeed[c.vid] {
 				seenSeed[c.vid] = true
-				chosen = append(chosen, c.vid)
+				chosen = append(chosen, c)
 				break
 			}
 		}
@@ -1675,7 +2632,7 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 			for _, c := range byArtist[ak] {
 				if !d.usedSeeds[c.vid] && !seenSeed[c.vid] {
 					seenSeed[c.vid] = true
-					chosen = append(chosen, c.vid)
+					chosen = append(chosen, c)
 					if len(chosen) >= targetSeeds {
 						break
 					}
@@ -1692,7 +2649,7 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 			for _, c := range byArtist[ak] {
 				if !seenSeed[c.vid] {
 					seenSeed[c.vid] = true
-					chosen = append(chosen, c.vid)
+					chosen = append(chosen, c)
 					break
 				}
 			}
@@ -1706,7 +2663,7 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 			for _, c := range byArtist[ak] {
 				if !seenSeed[c.vid] {
 					seenSeed[c.vid] = true
-					chosen = append(chosen, c.vid)
+					chosen = append(chosen, c)
 					if len(chosen) >= targetSeeds {
 						break
 					}
@@ -1717,86 +2674,142 @@ func (d *Downloader) DiscoverOnline(seed int) []DiscoverItem {
 			}
 		}
 	}
-	for _, vid := range chosen {
-		d.usedSeeds[vid] = true
+	for _, c := range chosen {
+		d.usedSeeds[c.vid] = true
 	}
 	d.recMu.Unlock()
 
-	set := d.app.Settings()
-	perSeed := make([][]DiscoverItem, len(chosen))
-	var wg sync.WaitGroup
-
-	for idx, vid := range chosen {
-		wg.Add(1)
-		go func(i int, v string) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
-			defer cancel()
-			mixURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", v, v)
-			args := []string{"--flat-playlist", "-J", "--playlist-end", "40", "--no-warnings"}
-			cArgs, cookieCleanup := tempCookieArgs(set)
-			defer cookieCleanup()
-			args = append(args, cArgs...)
-			args = append(args, mixURL)
-			cmd := exec.CommandContext(ctx, path, args...)
-			setCmdHidden(cmd)
-			raw, err := cmd.Output()
-			if err != nil || len(raw) == 0 {
-				return
+	var genreCacheMu sync.Mutex
+	artistGenreCache := map[string][]string{}
+	libProfile := discoveryLibraryProfile{
+		artists:     libArtists,
+		genreWeight: genreWeight,
+		genreTotal:  genreTotal,
+		artistGenre: func(artistKey string) []string {
+			if d.app.store == nil || artistKey == "" {
+				return nil
 			}
-			var pl ytFlatPlaylist
-			if json.Unmarshal(raw, &pl) != nil || len(pl.Entries) == 0 {
-				return
+			genreCacheMu.Lock()
+			cached, ok := artistGenreCache[artistKey]
+			genreCacheMu.Unlock()
+			if ok {
+				return cached
 			}
-			perSeed[i] = filterFlatPlaylistEntries(pl, matcher, true, time.Now().UnixNano()+int64(i)*7919)
-		}(idx, vid)
-	}
-	wg.Wait()
-
-	maxLen := 0
-	for _, list := range perSeed {
-		if len(list) > maxLen {
-			maxLen = len(list)
-		}
+			gs, _, found := d.app.store.artistGenres(artistKey)
+			if !found {
+				gs = nil
+			}
+			genreCacheMu.Lock()
+			artistGenreCache[artistKey] = gs
+			genreCacheMu.Unlock()
+			return gs
+		},
 	}
 
-	// Interleave results across all seeds while enforcing strict song distinctness and capping at 2 tracks per channel/artist
+	outcomes := make([]radioFetchOutcome, len(chosen))
+
+	// Pure-Go YouTube Music / YouTube InnerTube HTTP path (zero subprocesses, bounded concurrency).
+	httpSem := make(chan struct{}, 3)
+	var httpWg sync.WaitGroup
+	baseSeed := time.Now().UnixNano()
+	for idx, seedInfo := range chosen {
+		httpWg.Add(1)
+		go func(i int, s discoverySeedInfo) {
+			defer httpWg.Done()
+			select {
+			case httpSem <- struct{}{}:
+			case <-discCtx.Done():
+				return
+			}
+			defer func() { <-httpSem }()
+			ctx, cancel := context.WithTimeout(discCtx, 8*time.Second)
+			entries, src, err := fetchYouTubeRadioWithSource(ctx, d.httpClient, s.vid)
+			cancel()
+
+			if err == nil && len(entries) > 0 {
+				coh, sah, lah, th, ah := evaluateRadioMixCoherence(s, entries, src, libProfile)
+				if coh {
+					outcomes[i] = radioFetchOutcome{
+						seed:           s,
+						source:         src,
+						entries:        entries,
+						coherent:       true,
+						seedArtistHits: sah,
+						libArtistHits:  lah,
+						tokenHits:      th,
+						anchorHits:     ah,
+					}
+					return
+				}
+			}
+
+			// Fallback to artist search when radio mix failed or drifted into generic pop filler
+			if s.artist != "" && discCtx.Err() == nil {
+				ctx2, cancel2 := context.WithTimeout(discCtx, 8*time.Second)
+				sEntries, sErr := fetchYouTubeSearchInnerTube(ctx2, d.httpClient, s.artist+" official audio", 20)
+				cancel2()
+				if sErr == nil && len(sEntries) > 0 {
+					outcomes[i] = radioFetchOutcome{
+						seed:     s,
+						source:   ytRadioSourceSearch,
+						entries:  sEntries,
+						coherent: true,
+					}
+				}
+			}
+		}(idx, seedInfo)
+	}
+	httpWg.Wait()
+
+	if errors.Is(discCtx.Err(), context.Canceled) {
+		return []DiscoverItem{}
+	}
+
 	artistCount := map[string]int{}
-	var out []DiscoverItem
+	out := rankDiscoveryOutcomes(outcomes, matcher, libProfile, baseSeed, 16, artistCount)
 
-	for round := 0; round < maxLen && len(out) < 16; round++ {
-		for s := 0; s < len(perSeed) && len(out) < 16; s++ {
-			if round >= len(perSeed[s]) {
-				continue
-			}
-			it := perSeed[s][round]
-			if matcher.matches(it.VideoID, it.Title, it.Artist) {
-				continue
-			}
-			aKey := normSongText(it.Artist)
-			if aKey != "" && artistCount[aKey] >= 2 {
-				continue
-			}
-			matcher.add(it.VideoID, it.Title, it.Artist)
-			if aKey != "" {
-				artistCount[aKey]++
-			}
-			out = append(out, it)
+	// If recommendation history filtered most candidates, top up using non-owned tracks from the same coherent outcomes.
+	if len(out) < 16 {
+		ownedMatcher := d.buildOwnedDiscoveryMatcher()
+		for _, it := range out {
+			ownedMatcher.add(it.VideoID, it.Title, it.Artist)
 		}
+		topUp := rankDiscoveryOutcomes(outcomes, ownedMatcher, libProfile, baseSeed+17, 16-len(out), artistCount)
+		out = append(out, topUp...)
 	}
+
 	d.recordRecommended(out, matcher.knownNames)
+	if discCtx.Err() == nil && len(out) > 0 {
+		thumbCtx, thumbCancel := context.WithTimeout(discCtx, 4*time.Second)
+		prewarmYtThumbs(thumbCtx, out, 8)
+		thumbCancel()
+	}
 	return out
 }
 
 func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverItem {
-	path := d.app.ytdlp.Path()
-	if path == "" {
-		return []DiscoverItem{}
-	}
 	artistName = strings.TrimSpace(artistName)
 	if artistName == "" {
 		return []DiscoverItem{}
 	}
+	artistCtx, artistCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	d.artistDiscMu.Lock()
+	if d.artistDiscCancel != nil {
+		d.artistDiscCancel()
+	}
+	d.artistDiscGen++
+	myGen := d.artistDiscGen
+	d.artistDiscCancel = artistCancel
+	d.artistDiscMu.Unlock()
+	defer func() {
+		artistCancel()
+		d.artistDiscMu.Lock()
+		if d.artistDiscGen == myGen {
+			d.artistDiscCancel = nil
+		}
+		d.artistDiscMu.Unlock()
+	}()
+
 	matcher := d.buildDiscoveryMatcher(artistName)
 	targetNorm := strings.ToLower(artistName)
 
@@ -1814,7 +2827,6 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 	}
 	d.app.trMu.RUnlock()
 
-	set := d.app.Settings()
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(seed)*7919))
 
 	// Build queries targeting this artist's music so we get plenty of songs across albums/OSTs
@@ -1826,43 +2838,54 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 	}
 	qIdx := ((seed % len(searchQueries)) + len(searchQueries)) % len(searchQueries)
 	primarySearch := searchQueries[qIdx]
+	fallbackSearch := searchQueries[(qIdx+1)%len(searchQueries)]
 
-	var sources []string
-	sources = append(sources, primarySearch)
+	radioVid := ""
 	if len(artistVids) > 0 {
 		rng.Shuffle(len(artistVids), func(i, j int) { artistVids[i], artistVids[j] = artistVids[j], artistVids[i] })
-		vid := artistVids[0]
-		sources = append(sources, fmt.Sprintf("https://www.youtube.com/watch?v=%s&list=RD%s", vid, vid))
+		radioVid = artistVids[0]
 	}
 
-	perSource := make([][]DiscoverItem, len(sources))
+	sourceCount := 1
+	if radioVid != "" {
+		sourceCount = 2
+	}
+	perSource := make([][]DiscoverItem, sourceCount)
 	var wg sync.WaitGroup
 
-	for idx, src := range sources {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ctx, cancel := context.WithTimeout(artistCtx, 8*time.Second)
+		entries, err := fetchYouTubeSearchInnerTube(ctx, d.httpClient, primarySearch, 40)
+		cancel()
+		if (err != nil || len(entries) == 0) && artistCtx.Err() == nil {
+			ctx2, cancel2 := context.WithTimeout(artistCtx, 8*time.Second)
+			entries, err = fetchYouTubeSearchInnerTube(ctx2, d.httpClient, fallbackSearch, 40)
+			cancel2()
+		}
+		if err == nil && len(entries) > 0 {
+			perSource[0] = filterFlatPlaylistEntries(ytFlatPlaylist{Entries: entries}, matcher, seed > 0, time.Now().UnixNano()+int64(seed)*997)
+		}
+	}()
+
+	if radioVid != "" {
 		wg.Add(1)
-		go func(i int, target string) {
+		go func(v string) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
-			defer cancel()
-			args := []string{"--flat-playlist", "-J", "--playlist-end", "40", "--no-warnings"}
-			cArgs, cookieCleanup := tempCookieArgs(set)
-			defer cookieCleanup()
-			args = append(args, cArgs...)
-			args = append(args, target)
-			cmd := exec.CommandContext(ctx, path, args...)
-			setCmdHidden(cmd)
-			raw, err := cmd.Output()
-			if err != nil || len(raw) == 0 {
-				return
+			ctx, cancel := context.WithTimeout(artistCtx, 8*time.Second)
+			entries, err := fetchYouTubeRadioInnerTube(ctx, d.httpClient, v)
+			cancel()
+			if err == nil && len(entries) > 0 {
+				perSource[1] = filterFlatPlaylistEntries(ytFlatPlaylist{Entries: entries}, matcher, seed > 0, time.Now().UnixNano()+3571+int64(seed)*997)
 			}
-			var pl ytFlatPlaylist
-			if json.Unmarshal(raw, &pl) != nil || len(pl.Entries) == 0 {
-				return
-			}
-			perSource[i] = filterFlatPlaylistEntries(pl, matcher, seed > 0, time.Now().UnixNano()+int64(i)*3571+int64(seed)*997)
-		}(idx, src)
+		}(radioVid)
 	}
 	wg.Wait()
+
+	if errors.Is(artistCtx.Err(), context.Canceled) {
+		return []DiscoverItem{}
+	}
 
 	var directMatches []DiscoverItem
 	var relatedMatches []DiscoverItem
@@ -1906,5 +2929,10 @@ func (d *Downloader) DiscoverForArtist(artistName string, seed int) []DiscoverIt
 		}
 	}
 	d.recordRecommended(out, matcher.knownNames)
+	if artistCtx.Err() == nil && len(out) > 0 {
+		thumbCtx, thumbCancel := context.WithTimeout(artistCtx, 3*time.Second)
+		prewarmYtThumbs(thumbCtx, out, 8)
+		thumbCancel()
+	}
 	return out
 }

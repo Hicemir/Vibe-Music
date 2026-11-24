@@ -410,7 +410,7 @@ class ContextEnricher(
         }
         val body = getText(
             sb.toString(),
-            mapOf("User-Agent" to "VibeMusic/0.6", "Accept" to "application/json")
+            mapOf("User-Agent" to "VibeMusic/0.7", "Accept" to "application/json")
         ) ?: return ""
         return try {
             val results = JSONObject(body).optJSONArray("results") ?: return ""
@@ -491,7 +491,7 @@ class ContextEnricher(
         }"
         val body = getText(
             u,
-            mapOf("User-Agent" to "VibeMusic/0.6 (https://github.com/vibemusic)", "Accept" to "application/json")
+            mapOf("User-Agent" to "VibeMusic/0.7 (https://github.com/vibemusic)", "Accept" to "application/json")
         ) ?: return ""
         return try {
             val pages = JSONObject(body).optJSONObject("query")?.optJSONObject("pages") ?: return ""

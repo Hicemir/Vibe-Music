@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"image"
 	"image/color"
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
+	"io"
 	"math"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type thumbKey struct {
@@ -20,8 +25,9 @@ type thumbKey struct {
 }
 
 var (
-	thumbMu       sync.Mutex
-	thumbInflight = map[thumbKey]chan struct{}{}
+	thumbMu           sync.Mutex
+	thumbInflight     = map[thumbKey]chan struct{}{}
+	ytThumbHTTPClient = &http.Client{Timeout: 6 * time.Second}
 )
 
 func normalizeThumbSize(raw string) int {
@@ -38,6 +44,8 @@ func normalizeThumbSize(raw string) int {
 		return 128
 	case n <= 300:
 		return 300
+	case n <= 480:
+		return 480
 	default:
 		return 0
 	}
@@ -220,4 +228,190 @@ func resizedCoverPath(id string, maxDim int) string {
 		return srcPath
 	}
 	return dstPath
+}
+
+type subImager interface {
+	SubImage(r image.Rectangle) image.Image
+}
+
+func cropSquareCover(src image.Image) image.Image {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 || w == h {
+		return src
+	}
+	side := min(w, h)
+	// Standard 4:3 YouTube thumbnails (480x360 hqdefault, 640x480 sddefault) have top/bottom black bars around a 16:9 frame.
+	if w == 480 && h == 360 {
+		side = 270
+	} else if w == 640 && h == 480 {
+		side = 360
+	}
+	x0 := b.Min.X + (w-side)/2
+	y0 := b.Min.Y + (h-side)/2
+	rect := image.Rect(x0, y0, x0+side, y0+side)
+	if si, ok := src.(subImager); ok {
+		return si.SubImage(rect)
+	}
+	return src
+}
+
+func ytThumbCandidateURLs(videoID, rawURL string) []string {
+	var out []string
+	if rawURL != "" {
+		if u, err := url.Parse(rawURL); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+			host := strings.ToLower(u.Hostname())
+			if strings.Contains(host, "googleusercontent.com") || strings.Contains(host, "ggpht.com") {
+				cand := strings.TrimSpace(rawURL)
+				if googleThumbParamRe.MatchString(cand) {
+					cand = googleThumbParamRe.ReplaceAllString(cand, "=w480-h480-l90-rj")
+				} else if idx := strings.LastIndex(cand, "="); idx > strings.LastIndex(cand, "/") {
+					cand = cand[:idx] + "=w480-h480-l90-rj"
+				}
+				out = append(out, cand)
+			} else if host == "127.0.0.1" || host == "localhost" {
+				out = append(out, rawURL)
+			}
+		}
+	}
+	out = append(out,
+		"https://i.ytimg.com/vi/"+videoID+"/maxresdefault.jpg",
+		"https://i.ytimg.com/vi/"+videoID+"/sddefault.jpg",
+		"https://i.ytimg.com/vi/"+videoID+"/hqdefault.jpg",
+	)
+	return out
+}
+
+// cachedYtThumbPath returns a disk-cached 1:1 square JPEG thumbnail path (<=480x480) for a YouTube videoID.
+func cachedYtThumbPath(videoID, rawURL string) string {
+	if !ytIDRe.MatchString(videoID) {
+		return ""
+	}
+
+	dstDir := filepath.Join(coverDir(), "thumbs", "v3", "yt")
+	dstPath := filepath.Join(dstDir, videoID+".jpg")
+	if st, err := os.Stat(dstPath); err == nil && st.Size() > 0 {
+		return dstPath
+	}
+
+	tk := thumbKey{key: "yt_" + videoID, dim: 480}
+	for {
+		thumbMu.Lock()
+		waitCh, inFlight := thumbInflight[tk]
+		if !inFlight {
+			waitCh = make(chan struct{})
+			thumbInflight[tk] = waitCh
+			thumbMu.Unlock()
+			break
+		}
+		thumbMu.Unlock()
+		<-waitCh
+		if st, err := os.Stat(dstPath); err == nil && st.Size() > 0 {
+			return dstPath
+		}
+		return ""
+	}
+	defer func() {
+		thumbMu.Lock()
+		if ch := thumbInflight[tk]; ch != nil {
+			delete(thumbInflight, tk)
+			close(ch)
+		}
+		thumbMu.Unlock()
+	}()
+
+	if st, err := os.Stat(dstPath); err == nil && st.Size() > 0 {
+		return dstPath
+	}
+
+	var decoded image.Image
+	for _, candidate := range ytThumbCandidateURLs(videoID, rawURL) {
+		req, err := http.NewRequest(http.MethodGet, candidate, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		req.Header.Set("Accept", "image/jpeg,image/png,image/*;q=0.8")
+		resp, err := ytThumbHTTPClient.Do(req)
+		if err != nil {
+			continue
+		}
+		var img image.Image
+		var decErr error
+		if resp.StatusCode == http.StatusOK {
+			img, _, decErr = image.Decode(io.LimitReader(resp.Body, 4<<20))
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		_ = resp.Body.Close()
+		if decErr == nil && img != nil {
+			decoded = img
+			break
+		}
+	}
+	if decoded == nil {
+		return ""
+	}
+
+	cropped := cropSquareCover(decoded)
+	cb := cropped.Bounds()
+	cw, ch := cb.Dx(), cb.Dy()
+	if cw <= 0 || ch <= 0 {
+		return ""
+	}
+	var outImg image.Image = cropped
+	if cw != ch || cw > 480 || ch > 480 {
+		target := min(480, min(cw, ch))
+		outImg = downscaleCover(cropped, target, target)
+	}
+
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return ""
+	}
+	tmp, err := os.CreateTemp(dstDir, videoID+"-*.tmp")
+	if err != nil {
+		return ""
+	}
+	tmpPath := tmp.Name()
+	encErr := jpeg.Encode(tmp, outImg, &jpeg.Options{Quality: 92})
+	closeErr := tmp.Close()
+	if encErr != nil || closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return ""
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return ""
+	}
+	return dstPath
+}
+
+// prewarmYtThumbs downloads and caches square JPEG thumbnails for the first maxItems discover entries.
+func prewarmYtThumbs(ctx context.Context, items []DiscoverItem, maxItems int) {
+	if len(items) == 0 || maxItems <= 0 || ctx.Err() != nil {
+		return
+	}
+	n := min(len(items), maxItems)
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		it := items[i]
+		if it.VideoID == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(item DiscoverItem) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return
+			}
+			_ = cachedYtThumbPath(item.VideoID, item.ThumbURL)
+		}(it)
+	}
+	wg.Wait()
 }

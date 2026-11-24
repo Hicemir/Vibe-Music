@@ -4,6 +4,7 @@ import { buildRadioMix, setGenreTaxonomy } from './util'
 import type {
   Track, Playlist, PlayerState, QueueEntry, Settings, DownloadJob, YtdlpStatus, YtMusicStatus, Route, MenuItem, DiscoverItem,
   AIProviderPreset, LocalAIModel, LocalAIStatus, GenreStatus,
+  SyncPeer, TrustedSyncPeer, SyncPairPrompt, SyncStatus, SyncSelfInfo, SyncStateResponse,
 } from './types'
 
 export { Go }
@@ -23,6 +24,7 @@ export type Modal =
   | { type: 'ytmImport' }
   | { type: 'genre'; trackIds: string[]; label: string; current: string[] }
   | { type: 'movePrompt'; newPrimary: string; others: string[]; nextDirs: string[] }
+  | { type: 'syncPair'; prompt: SyncPairPrompt }
 
 class Core {
   tracks = $state.raw<Track[]>([])
@@ -39,6 +41,7 @@ class Core {
   discoverLoading = $state(false)
   discoverAttempted = $state(false)
   discoverSeed = $state(0)
+  private discoverReqId = 0
   settings = $state.raw<Settings | null>(null)
   downloads = $state.raw<DownloadJob[]>([])
   ytdlp = $state.raw<YtdlpStatus>({ state: 'idle', version: '', path: '', message: '' })
@@ -59,8 +62,16 @@ class Core {
     downloadedBytes: 0, totalBytes: 0, message: '', error: '',
   })
   moveStatus = $state.raw({ running: false, done: 0, total: 0, moved: 0, skipped: 0, failed: 0, message: '' })
+  syncPeers = $state.raw<SyncPeer[]>([])
+  syncSelf = $state.raw<SyncSelfInfo | null>(null)
+  trustedSyncPeers = $state.raw<TrustedSyncPeer[]>([])
+  syncStatus = $state.raw<SyncStatus>({
+    state: 'idle', phase: '', peerId: '', peerName: '', direction: '', pin: '', percent: 0,
+    currentFile: '', transferredBytes: 0, totalBytes: 0, filesDone: 0, filesTotal: 0, speedBps: 0,
+    addedTracks: 0, updatedTracks: 0, deletedTracks: 0, syncedPlaylists: 0, error: '', message: '',
+  })
   loaded = $state(false)
-  version = $state('0.6.2')
+  version = $state('0.7.0')
   windowMaximised = $state(true)
   coverExpanded = $state(false)
 
@@ -105,12 +116,20 @@ class Core {
     } catch {}
   }
 
+  async loadTrustedSyncPeers() {
+    try {
+      this.trustedSyncPeers = ((await Go.GetTrustedSyncPeers()) as unknown as TrustedSyncPeer[]) ?? []
+    } catch {}
+  }
+
   async fetchOnlineDiscover(append = false) {
     if (this.discoverLoading) return
+    const reqId = ++this.discoverReqId
     this.discoverLoading = true
     try {
       const seed = append || this.discoverItems.length > 0 ? ++this.discoverSeed : this.discoverSeed
       const items = (((await (Go as any).GetOnlineDiscovery?.(seed)) as DiscoverItem[]) ?? [])
+      if (reqId !== this.discoverReqId) return
       if (append) {
         const seen = new Set(this.discoverItems.map((x) => x.videoId))
         const fresh = items.filter((x) => !seen.has(x.videoId))
@@ -120,8 +139,49 @@ class Core {
       }
     } catch {
     } finally {
-      this.discoverLoading = false
-      this.discoverAttempted = true
+      if (reqId === this.discoverReqId) {
+        this.discoverLoading = false
+        this.discoverAttempted = true
+      }
+    }
+  }
+
+  cancelDiscoverState() {
+    this.discoverReqId++
+    this.discoverLoading = false
+    this.discoverAttempted = false
+  }
+
+  async setPlaylistTracksOptimistic(playlistId: number, trackIds: string[], add: boolean) {
+    const prevMap = this.playlistTrackMap
+    const prevPlaylists = this.playlists
+    const cur = prevMap[playlistId] ?? []
+    const targetSet = new Set(trackIds)
+    let nextIds: string[]
+    if (add) {
+      const have = new Set(cur)
+      const added = trackIds.filter((id) => !have.has(id))
+      if (added.length === 0) return
+      nextIds = [...cur, ...added]
+    } else {
+      nextIds = cur.filter((id) => !targetSet.has(id))
+      if (nextIds.length === cur.length) return
+    }
+    this.playlistTrackMap = { ...prevMap, [playlistId]: nextIds }
+    this.playlists = prevPlaylists.map((p) =>
+      p.id === playlistId ? { ...p, trackCount: nextIds.length } : p,
+    )
+    try {
+      if (add) {
+        await Go.AddToPlaylist(playlistId, trackIds)
+      } else {
+        await Go.RemoveFromPlaylist(playlistId, trackIds)
+      }
+    } catch {
+      this.playlistTrackMap = prevMap
+      this.playlists = prevPlaylists
+      await this.loadPlaylists()
+      throw new Error('Failed to update playlist')
     }
   }
 
@@ -424,8 +484,12 @@ class Core {
   lastMediaPlaybackState: MediaSessionPlaybackState = 'none'
 
   applyPlayerState(s: PlayerState) {
-    this.position = s.position
-    this.duration = s.duration
+    if (Math.abs(this.position - s.position) >= 0.25 || s.position === 0) {
+      this.position = s.position
+    }
+    if (this.duration !== s.duration) {
+      this.duration = s.duration
+    }
     const prev = this.player
     const structuralChanged =
       prev.trackId !== s.trackId ||
@@ -496,7 +560,12 @@ class Core {
     EventsOn('genres:status', (s: GenreStatus) => (this.genreStatus = s))
     EventsOn('ai:local:status', (s: LocalAIStatus) => (this.localAI = s))
     EventsOn('library:move', (s: typeof this.moveStatus) => (this.moveStatus = s))
-    EventsOn('settings:changed', (s: Settings) => (this.settings = s))
+    EventsOn('settings:changed', (s: Settings) => {
+      this.settings = s
+      if ((s.homeHidden ?? ['discover']).includes('discover')) {
+        this.cancelDiscoverState()
+      }
+    })
     EventsOn('app:toast', (t: string) => this.toast(t))
     EventsOn('ytdlp:status', (s: YtdlpStatus) => (this.ytdlp = s))
     EventsOn('ytm:status', (s: YtMusicStatus) => (this.ytm = s))
@@ -530,6 +599,29 @@ class Core {
       } else this.downloads = [...this.downloads, j]
     })
     EventsOn('download:cleared', async () => (this.downloads = ((await Go.GetDownloads()) as unknown as DownloadJob[]) ?? []))
+    EventsOn('sync:peers', (p: SyncPeer[] | null) => (this.syncPeers = p ?? []))
+    EventsOn('sync:state', (st: SyncStateResponse) => {
+      if (!st) return
+      this.syncSelf = st.self
+      this.syncStatus = st.status
+      this.syncPeers = st.peers ?? []
+      if (st.prompt) this.modal = { type: 'syncPair', prompt: st.prompt }
+    })
+    EventsOn('sync:status', (s: SyncStatus) => {
+      this.syncStatus = s
+      if (s.state === 'done') {
+        this.loadTrustedSyncPeers()
+        this.loadTracks()
+        this.loadPlaylists()
+      }
+    })
+    EventsOn('sync:pair-prompt', (prompt: SyncPairPrompt | null) => {
+      if (prompt) {
+        this.modal = { type: 'syncPair', prompt }
+      } else if (this.modal?.type === 'syncPair') {
+        this.modal = null
+      }
+    })
 
     const genreInit = (async () => {
       try {

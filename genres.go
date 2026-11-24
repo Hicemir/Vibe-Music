@@ -33,7 +33,7 @@ func httpGetJSON(u string, v any) error {
 			time.Sleep(time.Duration(attempt) * 2500 * time.Millisecond)
 		}
 		req, _ := http.NewRequest("GET", u, nil)
-		req.Header.Set("User-Agent", "VibeMusic/0.6 (https://github.com/vibemusic)")
+		req.Header.Set("User-Agent", "VibeMusic/0.7 (https://github.com/vibemusic)")
 		req.Header.Set("Accept", "application/json")
 		resp, err := genreHTTP.Do(req)
 		if err != nil {
@@ -233,8 +233,9 @@ func (s *Store) SetTracksGenre(ids []string, genre, source string) error {
 	if err != nil {
 		return err
 	}
+	now := time.Now().Unix()
 	for _, id := range ids {
-		if _, err := tx.Exec(`UPDATE tracks SET genre=?, genre_source=? WHERE id=?`, genre, source, id); err != nil {
+		if _, err := tx.Exec(`UPDATE tracks SET genre=?, genre_source=?, updated_at=? WHERE id=?`, genre, source, now, id); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -258,8 +259,9 @@ func (s *Store) SetTrackGenresBatch(updates map[string]TrackGenreUpdate) error {
 	if err != nil {
 		return err
 	}
+	now := time.Now().Unix()
 	for id, u := range updates {
-		if _, err := tx.Exec(`UPDATE tracks SET genre=?, genre_source=? WHERE id=? AND genre_source<>'user'`, u.Genre, u.Source, id); err != nil {
+		if _, err := tx.Exec(`UPDATE tracks SET genre=?, genre_source=?, updated_at=? WHERE id=? AND genre_source<>'user'`, u.Genre, u.Source, now, id); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -285,7 +287,7 @@ ON CONFLICT(artist_key) DO UPDATE SET genre=excluded.genre, source=excluded.sour
 func (s *Store) ResetGenres() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, _ = s.db.Exec(`UPDATE tracks SET genre='', genre_source='' WHERE genre_source<>'user'`)
+	_, _ = s.db.Exec(`UPDATE tracks SET genre='', genre_source='', updated_at=? WHERE genre_source<>'user'`, time.Now().Unix())
 	_, _ = s.db.Exec(`DELETE FROM artist_genres`)
 }
 

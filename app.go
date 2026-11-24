@@ -29,6 +29,7 @@ type App struct {
 	tray    *Tray
 	localAI *LocalAIManager
 	genres  *GenreDetector
+	syncMgr *SyncManager
 
 	setMu sync.RWMutex
 	set   Settings
@@ -127,6 +128,7 @@ func (a *App) startup(ctx context.Context) {
 	a.scanner.onDone = a.genres.Kick
 	a.ytdlp = NewYtdlp(a.emit)
 	a.dl = NewDownloader(a)
+	a.syncMgr = NewSyncManager(a)
 
 	a.player = NewPlayer(st, a.lookup, a.emit)
 	if err := a.player.Init(a.set); err != nil {
@@ -177,6 +179,12 @@ func (a *App) beforeClose(ctx context.Context) bool {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.dl != nil {
+		a.dl.CancelDiscovery()
+	}
+	if a.syncMgr != nil {
+		a.syncMgr.Shutdown()
+	}
 	if a.genres != nil {
 		a.genres.Cancel()
 	}
@@ -221,7 +229,7 @@ func (a *App) CloseWindow() {
 }
 
 func (a *App) GetVersion() string {
-	return "0.6.2"
+	return "0.7.0"
 }
 
 func (a *App) OpenInBrowser(url string) {
@@ -394,6 +402,14 @@ func (a *App) SetPlaylistTracks(id int64, ids []string) {
 func (a *App) AddToPlaylist(id int64, ids []string) int {
 	n, _ := a.store.AddToPlaylist(id, ids)
 	a.emit("playlists:changed")
+	return n
+}
+
+func (a *App) RemoveFromPlaylist(id int64, ids []string) int {
+	n, _ := a.store.RemoveFromPlaylist(id, ids)
+	if n > 0 {
+		a.emit("playlists:changed")
+	}
 	return n
 }
 
@@ -697,6 +713,14 @@ func (a *App) SaveSettings(s Settings) Settings {
 	_ = a.store.SaveSettings(s)
 	a.emit("settings:changed", s)
 	a.player.ApplySettings(s)
+	if a.dl != nil {
+		for _, sec := range s.HomeHidden {
+			if sec == "discover" {
+				a.dl.CancelDiscovery()
+				break
+			}
+		}
+	}
 	if strings.Join(old.MusicDirs, "|") != strings.Join(s.MusicDirs, "|") || old.DownloadDir != s.DownloadDir {
 		for _, d := range s.MusicDirs {
 			_ = os.MkdirAll(d, 0o755)
@@ -925,6 +949,14 @@ func (coverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if strings.HasPrefix(r.URL.Path, "/ytthumb/") {
+		vid := strings.TrimPrefix(r.URL.Path, "/ytthumb/")
+		if p := cachedYtThumbPath(vid, r.URL.Query().Get("u")); p != "" {
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			http.ServeFile(w, r, p)
+			return
+		}
+	}
 	if strings.HasPrefix(r.URL.Path, "/audio/") {
 		id := strings.TrimPrefix(r.URL.Path, "/audio/")
 		if id != "" && globalApp != nil {
@@ -937,6 +969,93 @@ func (coverHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+// ---------- LAN Sync ----------
+
+type SyncManualConnectResult struct {
+	Peer  *SyncPeer `json:"peer"`
+	Error string    `json:"error"`
+}
+
+func (a *App) StartSyncDiscovery() string {
+	if a.syncMgr == nil {
+		return "Sync manager is not initialized"
+	}
+	if err := a.syncMgr.StartDiscovery(); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func (a *App) StopSyncDiscovery() {
+	if a.syncMgr != nil {
+		a.syncMgr.StopDiscovery()
+	}
+}
+
+func (a *App) GetSyncState() SyncStateResponse {
+	if a.syncMgr == nil {
+		return SyncStateResponse{Peers: []SyncPeer{}, Status: SyncStatus{State: "idle"}}
+	}
+	return a.syncMgr.State()
+}
+
+func (a *App) GetTrustedSyncPeers() []TrustedSyncPeer {
+	if a.store == nil {
+		return []TrustedSyncPeer{}
+	}
+	return a.store.ListTrustedSyncPeers()
+}
+
+func (a *App) RemoveTrustedSyncPeer(deviceID string) {
+	if a.store != nil {
+		_ = a.store.DeleteTrustedSyncPeer(deviceID)
+	}
+	if a.syncMgr != nil {
+		a.syncMgr.emitPeers()
+	}
+}
+
+func (a *App) SetSyncDeviceName(name string) SyncStateResponse {
+	if a.store != nil {
+		_ = a.store.SetSyncDeviceName(name)
+	}
+	if a.syncMgr != nil {
+		a.syncMgr.disc.announceOnce()
+		return a.syncMgr.State()
+	}
+	return SyncStateResponse{}
+}
+
+func (a *App) ConnectSyncManualIP(ipPort string) SyncManualConnectResult {
+	if a.syncMgr == nil {
+		return SyncManualConnectResult{Error: "Sync manager is not initialized"}
+	}
+	p, err := a.syncMgr.ConnectManualIP(ipPort)
+	if err != nil {
+		return SyncManualConnectResult{Error: err.Error()}
+	}
+	return SyncManualConnectResult{Peer: &p}
+}
+
+func (a *App) StartPeerSync(deviceID string, syncDeletions bool) string {
+	if a.syncMgr == nil {
+		return "Sync manager is not initialized"
+	}
+	return a.syncMgr.StartPeerSync(deviceID, syncDeletions)
+}
+
+func (a *App) RespondSyncPair(pairID string, accept bool, trust bool) {
+	if a.syncMgr != nil {
+		a.syncMgr.RespondPair(pairID, accept, trust)
+	}
+}
+
+func (a *App) CancelSync() {
+	if a.syncMgr != nil {
+		a.syncMgr.CancelSync()
+	}
 }
 
 var _ = context.Background

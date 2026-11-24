@@ -17,20 +17,13 @@
   import Groups from './lib/Groups.svelte'
   import Search from './lib/Search.svelte'
   import Downloads from './lib/Downloads.svelte'
+  import SyncView from './lib/SyncView.svelte'
   import SettingsView from './lib/SettingsView.svelte'
 
   let topbar: TopBar | undefined = $state()
   let scroller: HTMLDivElement | undefined = $state()
   let topBarVisible = $state(false)
   const r = $derived(core.route)
-
-  function onWindowMouseMove(e: MouseEvent) {
-    if (e.clientY <= 12) {
-      if (!topBarVisible) topBarVisible = true
-    } else if (topBarVisible && e.clientY > 40) {
-      topBarVisible = false
-    }
-  }
 
   function onHoverBarMouseDown(e: MouseEvent) {
     if (e.button === 0 && !(e.target as HTMLElement | null)?.closest('button')) {
@@ -46,6 +39,12 @@
 
   onMount(() => {
     core.init()
+    const syncVisibility = () => {
+      document.documentElement.classList.toggle('doc-hidden', document.hidden)
+    }
+    syncVisibility()
+    document.addEventListener('visibilitychange', syncVisibility)
+    return () => document.removeEventListener('visibilitychange', syncVisibility)
   })
 
   $effect(() => {
@@ -149,7 +148,6 @@
 
 <svelte:window
   onkeydown={onKey}
-  onmousemove={onWindowMouseMove}
   onmousedown={onMouseButton}
   onmouseup={onMouseButton}
   oncontextmenu={(e) => { if (!(e.target as HTMLElement).closest('input,textarea')) e.preventDefault() }}
@@ -161,7 +159,7 @@
     class="hover-top-zone"
     class:show={topBarVisible}
     onmouseenter={() => (topBarVisible = true)}
-    onmouseleave={(e) => { if (e.clientY > 36) topBarVisible = false }}
+    onmouseleave={() => (topBarVisible = false)}
     onmousedown={onHoverBarMouseDown}
     ondblclick={onHoverBarDblClick}
   >
@@ -211,6 +209,8 @@
           <Search />
         {:else if r.name === 'downloads'}
           <Downloads />
+        {:else if r.name === 'sync'}
+          <SyncView />
         {:else if r.name === 'settings'}
           <SettingsView />
         {/if}

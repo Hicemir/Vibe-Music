@@ -5,7 +5,18 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.os.Build
 import com.vibemusic.nativeapp.genre.GenreTaxonomy
+import com.vibemusic.nativeapp.sync.SyncArtistGenre
+import com.vibemusic.nativeapp.sync.SyncCommitPayload
+import com.vibemusic.nativeapp.sync.SyncManifest
+import com.vibemusic.nativeapp.sync.SyncPlayEvent
+import com.vibemusic.nativeapp.sync.SyncPlaylist
+import com.vibemusic.nativeapp.sync.SyncSnapshot
+import com.vibemusic.nativeapp.sync.SyncTrack
+import com.vibemusic.nativeapp.sync.SyncTrackContext
+import com.vibemusic.nativeapp.sync.TrustedSyncPeer
+import com.vibemusic.nativeapp.ui.CoverLoader
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -13,6 +24,7 @@ import java.io.File
 import java.io.FileReader
 import java.io.FileWriter
 import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
@@ -70,6 +82,7 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
             """
             CREATE TABLE IF NOT EXISTS playlists(
               id INTEGER PRIMARY KEY AUTOINCREMENT,
+              sync_uuid TEXT NOT NULL DEFAULT '',
               name TEXT NOT NULL,
               created_at INTEGER NOT NULL DEFAULT 0,
               last_played INTEGER NOT NULL DEFAULT 0
@@ -99,6 +112,7 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         db.execSQL("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
         db.execSQL("CREATE TABLE IF NOT EXISTS hidden_tracks(track_id TEXT PRIMARY KEY);")
         ensureGenreSchema(db)
+        ensureSyncSchema(db)
         ensureIndexes(db)
     }
 
@@ -106,6 +120,7 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         super.onOpen(db)
         db.execSQL("CREATE TABLE IF NOT EXISTS hidden_tracks(track_id TEXT PRIMARY KEY);")
         ensureGenreSchema(db)
+        ensureSyncSchema(db)
         ensureIndexes(db)
     }
 
@@ -117,6 +132,51 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         ensureGenreSchema(db)
+        ensureSyncSchema(db)
+    }
+
+    private fun ensureSyncSchema(db: SQLiteDatabase) {
+        val cols = HashSet<String>()
+        db.rawQuery("PRAGMA table_info(playlists)", null).use { c ->
+            val nameIdx = c.getColumnIndex("name")
+            while (c.moveToNext()) {
+                if (nameIdx >= 0) cols.add(c.getString(nameIdx))
+            }
+        }
+        if (cols.isNotEmpty() && !cols.contains("sync_uuid")) {
+            db.execSQL("ALTER TABLE playlists ADD COLUMN sync_uuid TEXT NOT NULL DEFAULT ''")
+        }
+        val missingIds = ArrayList<Long>()
+        db.rawQuery("SELECT id FROM playlists WHERE sync_uuid = '' OR sync_uuid IS NULL", null).use { c ->
+            while (c.moveToNext()) {
+                missingIds.add(c.getLong(0))
+            }
+        }
+        for (pid in missingIds) {
+            db.execSQL("UPDATE playlists SET sync_uuid = ? WHERE id = ?", arrayOf(UUID.randomUUID().toString(), pid))
+        }
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_playlists_sync_uuid ON playlists(sync_uuid);")
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS trusted_sync_peers(
+              device_id TEXT PRIMARY KEY,
+              device_name TEXT NOT NULL DEFAULT '',
+              platform TEXT NOT NULL DEFAULT '',
+              pub_key_spki TEXT NOT NULL,
+              paired_at INTEGER NOT NULL DEFAULT 0,
+              last_sync_at INTEGER NOT NULL DEFAULT 0
+            );
+            """.trimIndent()
+        )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS sync_snapshots(
+              peer_device_id TEXT PRIMARY KEY,
+              snapshot_json TEXT NOT NULL,
+              synced_at INTEGER NOT NULL DEFAULT 0
+            );
+            """.trimIndent()
+        )
     }
 
     private fun ensureGenreSchema(db: SQLiteDatabase) {
@@ -510,7 +570,10 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
 
     @Synchronized
     fun setLiked(id: String, liked: Boolean) {
-        val cv = ContentValues().apply { put("liked", if (liked) 1 else 0) }
+        val cv = ContentValues().apply {
+            put("liked", if (liked) 1 else 0)
+            put("updated_at", System.currentTimeMillis() / 1000)
+        }
         writableDatabase.update("tracks", cv, "id = ?", arrayOf(id))
     }
 
@@ -518,7 +581,10 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
     fun updateTrackAlbum(trackId: String, albumName: String) {
         val clean = albumName.trim()
         if (clean.isEmpty()) return
-        val cv = ContentValues().apply { put("album", clean) }
+        val cv = ContentValues().apply {
+            put("album", clean)
+            put("updated_at", System.currentTimeMillis() / 1000)
+        }
         writableDatabase.update("tracks", cv, "id = ?", arrayOf(trackId))
     }
 
@@ -554,6 +620,7 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         val trimmed = name.trim().ifEmpty { "New playlist" }
         val now = System.currentTimeMillis() / 1000
         val cv = ContentValues().apply {
+            put("sync_uuid", UUID.randomUUID().toString())
             put("name", trimmed)
             put("created_at", now)
             put("last_played", 0L)
@@ -599,7 +666,7 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
     fun getPlaylists(): List<Playlist> {
         val list = mutableListOf<Playlist>()
         val sql = """
-            SELECT p.id, p.name, p.created_at, p.last_played,
+            SELECT p.id, COALESCE(p.sync_uuid, ''), p.name, p.created_at, p.last_played,
               (SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = p.id) AS track_count,
               COALESCE((SELECT SUM(t.duration) FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id WHERE pt.playlist_id = p.id), 0) AS total_dur
             FROM playlists p
@@ -611,11 +678,12 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
                 list.add(
                     Playlist(
                         id = cursor.getLong(0),
-                        name = cursor.getString(1),
-                        createdAt = cursor.getLong(2),
-                        lastPlayed = cursor.getLong(3),
-                        trackCount = cursor.getInt(4),
-                        duration = cursor.getDouble(5),
+                        syncUuid = cursor.getString(1).orEmpty(),
+                        name = cursor.getString(2),
+                        createdAt = cursor.getLong(3),
+                        lastPlayed = cursor.getLong(4),
+                        trackCount = cursor.getInt(5),
+                        duration = cursor.getDouble(6),
                         coverTracks = emptyList()
                     )
                 )
@@ -1220,13 +1288,14 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
     @Synchronized
     fun setTracksGenre(ids: List<String>, genre: String, source: String) {
         if (ids.isEmpty()) return
+        val now = System.currentTimeMillis() / 1000
         val db = writableDatabase
         db.beginTransaction()
         try {
             for (id in ids) {
                 db.execSQL(
-                    "UPDATE tracks SET genre = ?, genre_source = ? WHERE id = ?",
-                    arrayOf(genre, source, id)
+                    "UPDATE tracks SET genre = ?, genre_source = ?, updated_at = ? WHERE id = ?",
+                    arrayOf(genre, source, now, id)
                 )
             }
             db.setTransactionSuccessful()
@@ -1238,13 +1307,14 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
     @Synchronized
     fun setTrackGenresBatch(updates: Map<String, Pair<String, String>>) {
         if (updates.isEmpty()) return
+        val now = System.currentTimeMillis() / 1000
         val db = writableDatabase
         db.beginTransaction()
         try {
             for ((id, gs) in updates) {
                 db.execSQL(
-                    "UPDATE tracks SET genre = ?, genre_source = ? WHERE id = ? AND genre_source <> 'user'",
-                    arrayOf(gs.first, gs.second, id)
+                    "UPDATE tracks SET genre = ?, genre_source = ?, updated_at = ? WHERE id = ? AND genre_source <> 'user'",
+                    arrayOf(gs.first, gs.second, now, id)
                 )
             }
             db.setTransactionSuccessful()
@@ -1263,9 +1333,10 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         val clean = GenreTaxonomy.cleanUserGenres(genres)
         val joined = GenreTaxonomy.joinGenres(clean)
         val src = if (clean.isEmpty()) "" else "user"
+        val now = System.currentTimeMillis() / 1000
         writableDatabase.execSQL(
-            "UPDATE tracks SET genre = ?, genre_source = ? WHERE id = ?",
-            arrayOf(joined, src, trackId)
+            "UPDATE tracks SET genre = ?, genre_source = ?, updated_at = ? WHERE id = ?",
+            arrayOf(joined, src, now, trackId)
         )
     }
 
@@ -1283,8 +1354,9 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
 
     @Synchronized
     fun resetAutoGenres() {
+        val now = System.currentTimeMillis() / 1000
         val db = writableDatabase
-        db.execSQL("UPDATE tracks SET genre = '', genre_source = '' WHERE genre_source <> 'user'")
+        db.execSQL("UPDATE tracks SET genre = '', genre_source = '', updated_at = ? WHERE genre_source <> 'user'", arrayOf(now))
         db.execSQL("DELETE FROM artist_genres")
     }
 
@@ -1377,8 +1449,467 @@ class VibeStore(private val context: Context) : SQLiteOpenHelper(context, DATABA
         writableDatabase.delete("settings", "key = ?", arrayOf("ai_genre_pending"))
     }
 
+    // -------------------------------------------------------------
+    // LAN Sync Storage, Manifest Builder & Atomic Commit
+    // -------------------------------------------------------------
+
+    fun getSyncSetting(key: String): String {
+        readableDatabase.rawQuery("SELECT value FROM settings WHERE key = ? LIMIT 1", arrayOf(key)).use { c ->
+            if (c.moveToNext()) return c.getString(0).orEmpty()
+        }
+        return ""
+    }
+
+    @Synchronized
+    fun setSyncSetting(key: String, value: String) {
+        val cv = ContentValues().apply {
+            put("key", key)
+            put("value", value)
+        }
+        writableDatabase.insertWithOnConflict("settings", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getSyncDeviceName(): String {
+        val saved = getSyncSetting("sync_device_name").trim()
+        if (saved.isNotEmpty()) return saved
+        val mfg = Build.MANUFACTURER.orEmpty().trim()
+        val model = Build.MODEL.orEmpty().trim()
+        val raw = when {
+            model.isEmpty() -> "Android Phone"
+            mfg.isNotEmpty() && model.startsWith(mfg, ignoreCase = true) -> model
+            mfg.isNotEmpty() -> "$mfg $model"
+            else -> model
+        }
+        return raw.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    }
+
+    @Synchronized
+    fun setSyncDeviceName(name: String) {
+        setSyncSetting("sync_device_name", name.trim())
+    }
+
+    fun hasSyncedBefore(): Boolean {
+        readableDatabase.rawQuery("SELECT 1 FROM trusted_sync_peers LIMIT 1", null).use { c ->
+            if (c.moveToNext()) return true
+        }
+        readableDatabase.rawQuery("SELECT 1 FROM sync_snapshots LIMIT 1", null).use { c ->
+            if (c.moveToNext()) return true
+        }
+        return false
+    }
+
+    fun listTrustedSyncPeers(): List<TrustedSyncPeer> {
+        val out = ArrayList<TrustedSyncPeer>()
+        readableDatabase.rawQuery(
+            "SELECT device_id, device_name, platform, pub_key_spki, paired_at, last_sync_at FROM trusted_sync_peers ORDER BY last_sync_at DESC, paired_at DESC",
+            null
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    TrustedSyncPeer(
+                        deviceId = c.getString(0),
+                        deviceName = c.getString(1).orEmpty(),
+                        platform = c.getString(2).orEmpty(),
+                        pubKeySpkiB64 = c.getString(3),
+                        pairedAt = c.getLong(4),
+                        lastSyncAt = c.getLong(5)
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    fun getTrustedSyncPeer(deviceId: String): TrustedSyncPeer? {
+        readableDatabase.rawQuery(
+            "SELECT device_id, device_name, platform, pub_key_spki, paired_at, last_sync_at FROM trusted_sync_peers WHERE device_id = ? LIMIT 1",
+            arrayOf(deviceId)
+        ).use { c ->
+            if (c.moveToNext()) {
+                return TrustedSyncPeer(
+                    deviceId = c.getString(0),
+                    deviceName = c.getString(1).orEmpty(),
+                    platform = c.getString(2).orEmpty(),
+                    pubKeySpkiB64 = c.getString(3),
+                    pairedAt = c.getLong(4),
+                    lastSyncAt = c.getLong(5)
+                )
+            }
+        }
+        return null
+    }
+
+    @Synchronized
+    fun upsertTrustedSyncPeer(peer: TrustedSyncPeer) {
+        val now = System.currentTimeMillis() / 1000
+        val pairedAt = if (peer.pairedAt > 0L) peer.pairedAt else now
+        writableDatabase.execSQL(
+            """
+            INSERT INTO trusted_sync_peers(device_id, device_name, platform, pub_key_spki, paired_at, last_sync_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+              device_name = excluded.device_name,
+              platform = excluded.platform,
+              pub_key_spki = excluded.pub_key_spki,
+              last_sync_at = CASE WHEN excluded.last_sync_at > trusted_sync_peers.last_sync_at THEN excluded.last_sync_at ELSE trusted_sync_peers.last_sync_at END
+            """.trimIndent(),
+            arrayOf(peer.deviceId, peer.deviceName, peer.platform, peer.pubKeySpkiB64, pairedAt, peer.lastSyncAt)
+        )
+    }
+
+    @Synchronized
+    fun deleteTrustedSyncPeer(deviceId: String) {
+        writableDatabase.delete("trusted_sync_peers", "device_id = ?", arrayOf(deviceId))
+    }
+
+    fun loadSyncSnapshot(peerId: String): SyncSnapshot? {
+        var raw: String? = null
+        readableDatabase.rawQuery(
+            "SELECT snapshot_json FROM sync_snapshots WHERE peer_device_id = ? LIMIT 1",
+            arrayOf(peerId)
+        ).use { c ->
+            if (c.moveToNext()) raw = c.getString(0)
+        }
+        if (raw.isNullOrBlank()) return null
+        return try {
+            SyncSnapshot.fromJson(JSONObject(raw!!))
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun sidecarLrcFile(audioPath: String): File? {
+        if (audioPath.isBlank()) return null
+        val f = File(audioPath)
+        val parent = f.parentFile ?: return null
+        val stem = f.nameWithoutExtension
+        val lower = File(parent, "$stem.lrc")
+        if (lower.exists() && lower.isFile) return lower
+        val upper = File(parent, "$stem.LRC")
+        if (upper.exists() && upper.isFile) return upper
+        return null
+    }
+
+    fun trackByYtId(ytId: String): Track? {
+        if (ytId.isBlank()) return null
+        readableDatabase.rawQuery("SELECT * FROM tracks WHERE yt_id = ? LIMIT 1", arrayOf(ytId)).use { c ->
+            if (c.moveToNext()) return cursorToTrack(c)
+        }
+        return null
+    }
+
+    fun buildSyncManifest(deviceId: String, deviceName: String, dirs: List<String>): SyncManifest {
+        val rootMounted = HashMap<String, Boolean>()
+        for ((k, base) in roots) {
+            val f = File(base)
+            rootMounted[k] = f.exists() && f.isDirectory
+        }
+        var libraryUnmounted = false
+        if (dirs.isNotEmpty() && dirs.none { File(it).let { d -> d.exists() && d.isDirectory } }) {
+            libraryUnmounted = true
+        }
+
+        val hiddenSet = getHiddenTrackIds()
+        val allTracks = getAllTracks(includeHidden = true)
+        val liveIds = HashSet<String>(allTracks.size)
+        val syncTracks = ArrayList<SyncTrack>(allTracks.size)
+
+        for (t in allTracks) {
+            if (rootMounted[t.rootKey] != true) {
+                libraryUnmounted = true
+            }
+            val audioFile = if (t.resolvedPath.isNotEmpty()) File(t.resolvedPath) else null
+            if (audioFile == null || !audioFile.exists() || !audioFile.isFile) {
+                continue
+            }
+            liveIds.add(t.id)
+            val coverFile = getCoverFile(t.id)
+            val hasCoverFile = coverFile.exists() && coverFile.length() > 0L
+            val hasLyricsFile = sidecarLrcFile(t.resolvedPath) != null
+            syncTracks.add(
+                SyncTrack(
+                    id = t.id,
+                    ytId = t.ytId.orEmpty(),
+                    relPath = t.relPath,
+                    title = t.title,
+                    artist = t.artist,
+                    album = t.album,
+                    duration = t.duration,
+                    year = t.year,
+                    addedAt = t.addedAt,
+                    liked = t.liked,
+                    playCount = t.playCount,
+                    lastPlayed = t.lastPlayed,
+                    hasCover = t.hasCover || hasCoverFile,
+                    hasCoverFile = hasCoverFile,
+                    hasLyricsFile = hasLyricsFile,
+                    format = t.format,
+                    bitrate = t.bitrate,
+                    fileSize = t.fileSize,
+                    mtimeUnix = t.mtimeUnix,
+                    updatedAt = t.updatedAt,
+                    genre = t.genre,
+                    genreSource = t.genreSource,
+                    hidden = hiddenSet.contains(t.id)
+                )
+            )
+        }
+
+        val plMap = getAllPlaylistTracks()
+        val syncPlaylists = getPlaylists().map { pl ->
+            val cleanIds = (plMap[pl.id] ?: emptyList()).filter { liveIds.contains(it) }
+            SyncPlaylist(
+                syncUuid = pl.syncUuid,
+                name = pl.name,
+                createdAt = pl.createdAt,
+                lastPlayed = pl.lastPlayed,
+                trackIds = cleanIds
+            )
+        }
+
+        val history = ArrayList<SyncPlayEvent>()
+        val seenHist = HashSet<Pair<String, Long>>()
+        readableDatabase.rawQuery("SELECT track_id, played_at FROM play_history ORDER BY played_at ASC", null).use { c ->
+            while (c.moveToNext()) {
+                val tid = c.getString(0).orEmpty()
+                val at = c.getLong(1)
+                if (tid.isNotEmpty() && at > 0L && seenHist.add(tid to at)) {
+                    history.add(SyncPlayEvent(tid, at))
+                }
+            }
+        }
+
+        val artistGenres = ArrayList<SyncArtistGenre>()
+        readableDatabase.rawQuery("SELECT artist_key, genre, source, checked_at FROM artist_genres", null).use { c ->
+            while (c.moveToNext()) {
+                artistGenres.add(
+                    SyncArtistGenre(
+                        artistKey = c.getString(0).orEmpty(),
+                        genre = c.getString(1).orEmpty(),
+                        source = c.getString(2).orEmpty(),
+                        checkedAt = c.getLong(3)
+                    )
+                )
+            }
+        }
+
+        val trackContexts = ArrayList<SyncTrackContext>()
+        readableDatabase.rawQuery("SELECT cache_key, hints, updated_at FROM track_context", null).use { c ->
+            while (c.moveToNext()) {
+                trackContexts.add(
+                    SyncTrackContext(
+                        cacheKey = c.getString(0).orEmpty(),
+                        hints = c.getString(1).orEmpty(),
+                        updatedAt = c.getLong(2)
+                    )
+                )
+            }
+        }
+
+        return SyncManifest(
+            deviceId = deviceId,
+            deviceName = deviceName,
+            platform = "android",
+            generatedAt = System.currentTimeMillis() / 1000L,
+            libraryUnmounted = libraryUnmounted,
+            tracks = syncTracks,
+            playlists = syncPlaylists,
+            playHistory = history,
+            hiddenTrackIds = hiddenSet.toList(),
+            artistGenres = artistGenres,
+            trackContexts = trackContexts,
+            syncedYtCollections = loadSyncedYtCollections().toList()
+        )
+    }
+
+    @Synchronized
+    fun applySyncCommit(payload: SyncCommitPayload, peerId: String, snapshot: SyncSnapshot) {
+        data class DiskKill(val id: String, val audioPath: String, val lrcFile: File?)
+        val toDeleteFiles = ArrayList<DiskKill>(payload.deletedTrackIds.size)
+        for (id in payload.deletedTrackIds) {
+            val t = getTrackById(id)
+            toDeleteFiles.add(
+                DiskKill(
+                    id = id,
+                    audioPath = t?.resolvedPath.orEmpty(),
+                    lrcFile = t?.resolvedPath?.let { sidecarLrcFile(it) }
+                )
+            )
+        }
+
+        val snapJson = snapshot.toJson().toString()
+        val ytJson = JSONArray(payload.syncedYtCollections).toString()
+        val now = System.currentTimeMillis() / 1000L
+
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            for (id in payload.deletedTrackIds) {
+                db.delete("tracks", "id = ?", arrayOf(id))
+                db.delete("hidden_tracks", "track_id = ?", arrayOf(id))
+            }
+
+            for (t in payload.tracksMeta) {
+                db.execSQL(
+                    """
+                    UPDATE tracks SET
+                      title = ?, artist = ?, album = ?, duration = ?, year = ?, added_at = ?,
+                      liked = ?, play_count = ?, last_played = ?,
+                      has_cover = CASE WHEN has_cover = 1 OR ? = 1 THEN 1 ELSE 0 END,
+                      genre = ?, genre_source = ?, updated_at = ?
+                    WHERE id = ?
+                    """.trimIndent(),
+                    arrayOf(
+                        t.title, t.artist, t.album, t.duration, t.year, t.addedAt,
+                        if (t.liked) 1 else 0, t.playCount, t.lastPlayed,
+                        if (t.hasCover) 1 else 0,
+                        t.genre, t.genreSource, t.updatedAt,
+                        t.id
+                    )
+                )
+            }
+
+            val existingHist = HashSet<Pair<String, Long>>()
+            db.rawQuery("SELECT track_id, played_at FROM play_history", null).use { c ->
+                while (c.moveToNext()) {
+                    existingHist.add(c.getString(0).orEmpty() to c.getLong(1))
+                }
+            }
+            for (ev in payload.playHistory) {
+                if (ev.trackId.isNotEmpty() && ev.playedAt > 0L && existingHist.add(ev.trackId to ev.playedAt)) {
+                    db.execSQL(
+                        "INSERT INTO play_history(track_id, playlist_id, played_at) VALUES(?, 0, ?)",
+                        arrayOf(ev.trackId, ev.playedAt)
+                    )
+                }
+            }
+
+            val liveTracks = HashSet<String>()
+            db.rawQuery("SELECT id FROM tracks", null).use { c ->
+                while (c.moveToNext()) {
+                    liveTracks.add(c.getString(0))
+                }
+            }
+
+            db.delete("hidden_tracks", null, null)
+            for (hid in payload.hiddenTrackIds) {
+                if (liveTracks.contains(hid)) {
+                    db.execSQL("INSERT OR IGNORE INTO hidden_tracks(track_id) VALUES(?)", arrayOf(hid))
+                }
+            }
+
+            for (ag in payload.artistGenres) {
+                if (ag.artistKey.isEmpty()) continue
+                db.execSQL(
+                    """
+                    INSERT INTO artist_genres(artist_key, genre, source, checked_at) VALUES(?, ?, ?, ?)
+                    ON CONFLICT(artist_key) DO UPDATE SET
+                      genre = CASE WHEN excluded.checked_at >= artist_genres.checked_at THEN excluded.genre ELSE artist_genres.genre END,
+                      source = CASE WHEN excluded.checked_at >= artist_genres.checked_at THEN excluded.source ELSE artist_genres.source END,
+                      checked_at = MAX(artist_genres.checked_at, excluded.checked_at)
+                    """.trimIndent(),
+                    arrayOf(ag.artistKey, ag.genre, ag.source, ag.checkedAt)
+                )
+            }
+
+            for (tc in payload.trackContexts) {
+                if (tc.cacheKey.isEmpty()) continue
+                db.execSQL(
+                    """
+                    INSERT INTO track_context(cache_key, hints, updated_at) VALUES(?, ?, ?)
+                    ON CONFLICT(cache_key) DO UPDATE SET
+                      hints = CASE WHEN excluded.updated_at >= track_context.updated_at THEN excluded.hints ELSE track_context.hints END,
+                      updated_at = MAX(track_context.updated_at, excluded.updated_at)
+                    """.trimIndent(),
+                    arrayOf(tc.cacheKey, tc.hints, tc.updatedAt)
+                )
+            }
+
+            for (uuid in payload.deletedPlaylistUuids) {
+                if (uuid.isNotEmpty()) {
+                    db.delete("playlists", "sync_uuid = ?", arrayOf(uuid))
+                }
+            }
+
+            for (pl in payload.playlists) {
+                val cleanName = pl.name.trim()
+                if (cleanName.isEmpty() && pl.trackIds.isEmpty()) continue
+                var localId = 0L
+                if (pl.syncUuid.isNotEmpty()) {
+                    db.rawQuery("SELECT id FROM playlists WHERE sync_uuid = ? LIMIT 1", arrayOf(pl.syncUuid)).use { c ->
+                        if (c.moveToNext()) localId = c.getLong(0)
+                    }
+                }
+                if (localId == 0L && cleanName.isNotEmpty()) {
+                    db.rawQuery("SELECT id FROM playlists WHERE name = ? COLLATE NOCASE LIMIT 1", arrayOf(cleanName)).use { c ->
+                        if (c.moveToNext()) localId = c.getLong(0)
+                    }
+                }
+                if (localId == 0L) {
+                    val cv = ContentValues().apply {
+                        put("sync_uuid", pl.syncUuid.ifEmpty { UUID.randomUUID().toString() })
+                        put("name", cleanName.ifEmpty { "Playlist" })
+                        put("created_at", pl.createdAt)
+                        put("last_played", pl.lastPlayed)
+                    }
+                    localId = db.insert("playlists", null, cv)
+                } else {
+                    val cv = ContentValues().apply {
+                        put("sync_uuid", pl.syncUuid)
+                        put("name", cleanName.ifEmpty { "Playlist" })
+                        put("last_played", pl.lastPlayed)
+                    }
+                    db.update("playlists", cv, "id = ?", arrayOf(localId.toString()))
+                }
+                db.delete("playlist_tracks", "playlist_id = ?", arrayOf(localId.toString()))
+                var pos = 0
+                val seenInPl = HashSet<String>()
+                for (tid in pl.trackIds) {
+                    if (!liveTracks.contains(tid) || !seenInPl.add(tid)) continue
+                    val cv = ContentValues().apply {
+                        put("playlist_id", localId)
+                        put("track_id", tid)
+                        put("position", pos)
+                    }
+                    db.insert("playlist_tracks", null, cv)
+                    pos++
+                }
+            }
+
+            val ytCv = ContentValues().apply {
+                put("key", "yt_synced_collections")
+                put("value", ytJson)
+            }
+            db.insertWithOnConflict("settings", null, ytCv, SQLiteDatabase.CONFLICT_REPLACE)
+
+            if (peerId.isNotEmpty()) {
+                val snapCv = ContentValues().apply {
+                    put("peer_device_id", peerId)
+                    put("snapshot_json", snapJson)
+                    put("synced_at", now)
+                }
+                db.insertWithOnConflict("sync_snapshots", null, snapCv, SQLiteDatabase.CONFLICT_REPLACE)
+                db.execSQL("UPDATE trusted_sync_peers SET last_sync_at = ? WHERE device_id = ?", arrayOf(now, peerId))
+            }
+
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+
+        compactAllPlaylists()
+        for (k in toDeleteFiles) {
+            if (k.audioPath.isNotEmpty()) {
+                try { File(k.audioPath).delete() } catch (_: Exception) {}
+            }
+            try { k.lrcFile?.delete() } catch (_: Exception) {}
+            try { getCoverFile(k.id).delete() } catch (_: Exception) {}
+            CoverLoader.invalidate(k.id)
+        }
+    }
+
     companion object {
         const val DATABASE_NAME = "library.db"
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 3
     }
 }

@@ -20,7 +20,7 @@
   let dragVal = $state(0)
 
   const shown = $derived(dragging ? dragVal : value)
-  const pct = $derived(max > 0 ? clamp((shown / max) * 100, 0, 100) : 0)
+  const pct = $derived(max > 0 ? Math.round(clamp((shown / max) * 100, 0, 100) * 100) / 100 : 0)
 
   function pos(e: PointerEvent) {
     const r = el.getBoundingClientRect()

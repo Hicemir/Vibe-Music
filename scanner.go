@@ -33,8 +33,21 @@ type Scanner struct {
 	mu        sync.Mutex
 	watcher   *fsnotify.Watcher
 	timer     *time.Timer
+	paused    atomic.Bool
 	onChanged func() // called when scan added/updated/removed tracks
 	onDone    func() // called after every full scan
+}
+
+func (s *Scanner) SetPaused(paused bool) {
+	s.paused.Store(paused)
+	if paused {
+		s.mu.Lock()
+		if s.timer != nil {
+			s.timer.Stop()
+			s.timer = nil
+		}
+		s.mu.Unlock()
+	}
 }
 
 func NewScanner(store *Store, emit func(string, ...any)) *Scanner {
@@ -326,7 +339,7 @@ func (s *Scanner) Scan(dirs []string) {
 
 	s.emit("library:scan", map[string]any{"scanning": true, "done": 0, "total": 0})
 	existing := map[string]Track{}
-	if all, err := s.store.AllTracks(); err == nil {
+	if all, err := s.store.AllTracksIncludeHidden(); err == nil {
 		for _, t := range all {
 			existing[t.Path] = t
 		}
@@ -546,12 +559,19 @@ func (s *Scanner) Watch(dirs []string) {
 }
 
 func (s *Scanner) debounce(dirs []string) {
+	if s.paused.Load() {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.timer != nil {
 		s.timer.Stop()
 	}
-	s.timer = time.AfterFunc(3*time.Second, func() { s.Scan(dirs) })
+	s.timer = time.AfterFunc(3*time.Second, func() {
+		if !s.paused.Load() {
+			s.Scan(dirs)
+		}
+	})
 }
 
 // ReadLyrics returns raw lyrics text from a sidecar .lrc or embedded tag.

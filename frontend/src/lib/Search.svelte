@@ -6,8 +6,8 @@
   import { core, Go } from './store.svelte'
   import { attachShelfNav, getShelfTargetLeft, groupBy, matches, norm, scrollShelfContainer } from './util'
 
-  const SHELF_INITIAL = 12
-  const SHELF_STEP = 12
+  const SHELF_INITIAL = 8
+  const SHELF_STEP = 8
 
   let filter = $state<'all' | 'songs' | 'albums' | 'artists' | 'playlists'>('all')
   const q = $derived(core.query.trim())
@@ -43,10 +43,10 @@
 
   function updateShelfState(secId: string) {
     const el = shelfEls[secId]
-    if (!el) return
+    if (!el || el.clientWidth <= 0) return
     const total = shelfTotal(secId)
     const shown = shelfShown[secId] ?? SHELF_INITIAL
-    if (shown < total && el.scrollLeft + el.clientWidth >= el.scrollWidth - 600) {
+    if (el.scrollLeft > 0 && shown < total && el.scrollLeft + el.clientWidth >= el.scrollWidth - 600) {
       shelfShown = { ...shelfShown, [secId]: Math.min(total, shown + SHELF_STEP) }
     }
     const left = el.scrollLeft > 2

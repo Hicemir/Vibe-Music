@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import Icon from './Icon.svelte'
   import Cover from './Cover.svelte'
   import TrackList from './TrackList.svelte'
   import { core, Go } from './store.svelte'
   import { trackMenu, tracksMenu } from './menus'
-  import { fmtDuration, fmtTime, matches, recommendForPlaylist, samplePool, splitArtists, fallbackYtThumb } from './util'
+  import { fmtDuration, fmtTime, matches, recommendForPlaylist, samplePool, splitArtists, discoverThumbUrl, fallbackYtThumb } from './util'
   import type { DiscoverItem, MenuItem, Playlist, Track } from './types'
 
   let {
@@ -107,11 +108,15 @@
 
   const FIND_LIMIT = 6
   const SUGGEST_LIMIT = 8
+  const SUGGEST_COOLDOWN = 3
 
   let findOrderedIds = $state<string[]>([])
   let suggestionOrderedIds = $state<string[]>([])
   let lastFindKey = ''
   let lastRecKey = ''
+  let recLastShown = new Map<string, number>()
+  let recShownCount = new Map<string, number>()
+  let lastRecPlaylistId = -1
 
   let plOnlineItems = $state<DiscoverItem[]>([])
   let plOnlineLoading = $state(false)
@@ -135,15 +140,35 @@
       suggestionOrderedIds = []
       return
     }
-    const picked = recommendForPlaylist(tracks, core.tracks, seed + playlistId * 17, core.tracks.length, core.playlistTrackMap)
+    const picked = recommendForPlaylist(
+      tracks,
+      core.tracks,
+      seed + playlistId * 17,
+      core.tracks.length,
+      core.playlistTrackMap,
+      {
+        refreshStep: seed,
+        lastShown: recLastShown,
+        shownCount: recShownCount,
+        cooldown: SUGGEST_COOLDOWN,
+      },
+    )
     suggestionOrderedIds = picked.map((t) => t.id)
+  }
+
+  function refreshSuggestions() {
+    for (const t of suggestions) {
+      recLastShown.set(t.id, recSeed)
+      recShownCount.set(t.id, (recShownCount.get(t.id) ?? 0) + 1)
+    }
+    recSeed++
   }
 
   $effect(() => {
     const fk = `${playlistId}|${findSeed}|${core.tracks.length}`
     if (fk !== lastFindKey) {
       lastFindKey = fk
-      buildFindOrder(findSeed)
+      untrack(() => buildFindOrder(findSeed))
     }
   })
 
@@ -152,11 +177,20 @@
   )
 
   $effect(() => {
+    if (playlistId !== lastRecPlaylistId) {
+      lastRecPlaylistId = playlistId
+      recLastShown.clear()
+      recShownCount.clear()
+      if (recSeed !== 0) {
+        recSeed = 0
+        return
+      }
+    }
     const hasTracks = tracks.length > 0 ? '1' : '0'
     const rk = `${playlistId}|${recSeed}|${tracks.length}|${core.tracks.length}|${hasTracks}|${genreSig}`
     if (rk !== lastRecKey) {
       lastRecKey = rk
-      buildSuggestionOrder(recSeed)
+      untrack(() => buildSuggestionOrder(recSeed))
     }
   })
 
@@ -249,6 +283,10 @@
     }
     if (isCurrentCollection) {
       Go.Pause()
+      return
+    }
+    if (!core.player.playing && core.player.queueLen > 0 && ids.includes(core.player.trackId)) {
+      Go.Resume()
       return
     }
     core.play(ids, -1, { playlistId })
@@ -416,7 +454,7 @@
               onclick={() => (Go as any).OpenInBrowser?.(d.url)}
               title="Open in browser (YouTube)"
             >
-              <div class="cover thumb"><img src={d.thumbUrl} alt="" loading="lazy" decoding="async" onload={fallbackYtThumb} onerror={fallbackYtThumb} /></div>
+              <div class="cover thumb"><img src={discoverThumbUrl(d.videoId, d.thumbUrl)} width="128" height="128" alt="" loading="lazy" decoding="async" onerror={fallbackYtThumb} /></div>
               <div class="mini-play-fab" style="pointer-events:none">
                 <Icon name="external" size={14} />
               </div>
@@ -547,7 +585,7 @@
                     onclick={() => (Go as any).OpenInBrowser?.(d.url)}
                     title="Open in browser (YouTube)"
                   >
-                    <div class="cover thumb"><img src={d.thumbUrl} alt="" loading="lazy" decoding="async" onload={fallbackYtThumb} onerror={fallbackYtThumb} /></div>
+                    <div class="cover thumb"><img src={discoverThumbUrl(d.videoId, d.thumbUrl)} width="128" height="128" alt="" loading="lazy" decoding="async" onerror={fallbackYtThumb} /></div>
                     <div class="mini-play-fab" style="pointer-events:none">
                       <Icon name="external" size={14} />
                     </div>
@@ -584,7 +622,7 @@
               {tracks.length > 0 ? 'Recommended from your local library based on artists, albums, titles, genres, and playlists' : 'Popular and liked songs from your local library'}
             </div>
           </div>
-          <button class="btn ghost" style="display:flex;align-items:center;gap:6px" onclick={() => recSeed++}>
+          <button class="btn ghost" style="display:flex;align-items:center;gap:6px" onclick={refreshSuggestions}>
             <Icon name="refresh" size={16} /> Refresh
           </button>
         </div>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte'
   import Icon from './Icon.svelte'
   import Cover from './Cover.svelte'
   import { core, Go } from './store.svelte'
@@ -6,6 +7,9 @@
 
   let dragFrom = $state(-1)
   let dragOver = $state(-1)
+  let bodyEl: HTMLDivElement | undefined = $state()
+  let sentinel: HTMLDivElement | undefined = $state()
+  let shown = $state(60)
 
   const idx = $derived(core.player.queueIndex)
   const current = $derived(core.queue[idx])
@@ -17,6 +21,26 @@
     { id: 'rediscover', label: 'Rediscover' },
     { id: 'artist', label: 'Same Artist' },
   ]
+
+  $effect(() => {
+    void core.queue
+    void idx
+    shown = 60
+  })
+
+  onMount(() => {
+    if (!sentinel) return
+    const io = new IntersectionObserver(
+      (es) => {
+        if (es.some((e) => e.isIntersecting) && shown < upcoming.length) {
+          shown += 60
+        }
+      },
+      { root: bodyEl ?? null, rootMargin: '400px' },
+    )
+    io.observe(sentinel)
+    return () => io.disconnect()
+  })
 </script>
 
 <div class="panel">
@@ -46,7 +70,7 @@
       {/each}
     </div>
   {/if}
-  <div class="panel-body" use:smoothScroll>
+  <div class="panel-body" bind:this={bodyEl} use:smoothScroll>
     {#if core.queue.length === 0}
       <div class="empty"><div class="big">Your queue is empty</div>Play something, or right-click a song and choose “Add to queue”.</div>
     {/if}
@@ -67,7 +91,7 @@
         <span>Next up · {upcoming.length}</span>
         <button class="link-btn" onclick={() => Go.ClearQueue()}>Clear queue</button>
       </div>
-      {#each upcoming as { e, i } (e.qid)}
+      {#each upcoming.slice(0, shown) as { e, i } (e.qid)}
         {@const t = core.byId.get(e.tid)}
         {#if t}
           <div
@@ -109,5 +133,6 @@
         {/if}
       {/each}
     {/if}
+    <div class="sentinel" bind:this={sentinel}></div>
   </div>
 </div>

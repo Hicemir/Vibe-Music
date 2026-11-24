@@ -99,7 +99,7 @@ func (a *App) moveMusic(sources []string, dest string) {
 		src string
 	}
 	var todo []item
-	all, _ := a.store.AllTracks()
+	all, _ := a.store.AllTracksIncludeHidden()
 	for _, t := range all {
 		if t.Path == "" || underDir(t.Path, dest) {
 			continue
